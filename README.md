@@ -1,2 +1,15 @@
 # cl-xml
-(cl-xml is a temporary name because it's already taken) A Common Lisp reader, writer, and custom parser.
+
+> **Note:** cl-xml is a temporary name as it is already taken on Quicklisp.
+
+A Common Lisp XML reader, writer, and custom parser.
+
+## Usage
+
+```lisp
+(ql:quickload "cl-xml")
+```
+
+## License
+
+MIT
