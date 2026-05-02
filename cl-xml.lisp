@@ -288,7 +288,7 @@ Returns the raw content string."
                     ((eql ch3 #\>)
                      (read-char stream) ; consume '>'
                      (return (copy-seq buf)))
-                    ;; ']]' not followed by '>' — keep first ']', reprocess second ']'
+                    ;; ']]' not followed by '>' — emit first ']', unread second ']' for reprocessing
                     (t
                      (vector-push-extend ch buf)
                      (unread-char #\] stream)))))
@@ -481,7 +481,7 @@ matching closing tag is consumed."
                   ((eql after-bang #\-)
                    (read-char stream)   ; consume first '-'
                    (unless (eql (peek-char nil stream nil nil) #\-)
-                     (error "Expected '--' to start comment"))
+                     (error "Expected second '-' in comment opening '<!--'"))
                    (read-char stream)   ; consume second '-'
                    (comment handler (xml-comment-data (parse-comment stream))))
                   ;; CDATA section: <![CDATA[
@@ -534,7 +534,7 @@ skipped.  Leaves STREAM positioned at the '<' of the root element."
              ((eql after-bang #\-)
               (read-char stream)        ; consume first '-'
               (unless (eql (peek-char nil stream nil nil) #\-)
-                (error "Expected '--' to start comment"))
+                (error "Expected second '-' in comment opening '<!--'"))
               (read-char stream)        ; consume second '-'
               (comment handler (xml-comment-data (parse-comment stream))))
              ;; DOCTYPE: <!DOCTYPE
