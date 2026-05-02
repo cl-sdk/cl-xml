@@ -505,6 +505,132 @@ matching closing tag is consumed."
              (t
               (parse-element-sax stream handler)))))))))
 
+;;; UTF-8 decoding stream — wraps a binary source for character access
+
+(defclass utf-8-decoding-stream (fundamental-character-input-stream)
+  ((%source    :initarg  :source
+               :reader   %source
+               :documentation "The underlying binary (octet) input stream.")
+   (%byte-buf  :initform '()
+               :accessor %byte-buf
+               :documentation "Bytes buffered for the next UTF-8 decode (head = next byte).")
+   (%char-back :initform nil
+               :accessor %char-back
+               :documentation "One character pushed back via UNREAD-CHAR."))
+  (:documentation
+   "Gray character input stream that decodes UTF-8 bytes from a binary source.
+Created by MAKE-UTF-8-DECODING-STREAM.  Supports a one-character pushback
+(required by the XML parser) and an internal byte-level pushback buffer used
+for BOM detection."))
+
+(defun %read-next-byte (s)
+  "Return the next byte from S's byte buffer, or from its source stream.
+Returns NIL at end of stream."
+  (if (%byte-buf s)
+      (let ((b (first (%byte-buf s))))
+        (setf (%byte-buf s) (rest (%byte-buf s)))
+        b)
+      (read-byte (%source s) nil nil)))
+
+(defun %decode-utf-8-char (s)
+  "Decode one UTF-8 character from S.  Returns :EOF at end of stream."
+  (let ((b0 (%read-next-byte s)))
+    (unless b0 (return-from %decode-utf-8-char :eof))
+    (cond
+      ;; Single byte: 0xxxxxxx  (U+0000–U+007F)
+      ((zerop (logand b0 #x80))
+       (code-char b0))
+      ;; Two bytes: 110xxxxx 10xxxxxx  (U+0080–U+07FF)
+      ((= (logand b0 #xE0) #xC0)
+       (let ((b1 (%read-next-byte s)))
+         (unless b1 (error "Truncated UTF-8 two-byte sequence"))
+         (code-char (logior (ash (logand b0 #x1F) 6)
+                            (logand b1 #x3F)))))
+      ;; Three bytes: 1110xxxx 10xxxxxx 10xxxxxx  (U+0800–U+FFFF)
+      ((= (logand b0 #xF0) #xE0)
+       (let* ((b1 (%read-next-byte s))
+              (b2 (%read-next-byte s)))
+         (unless (and b1 b2) (error "Truncated UTF-8 three-byte sequence"))
+         (code-char (logior (ash (logand b0 #x0F) 12)
+                            (ash (logand b1 #x3F) 6)
+                            (logand b2 #x3F)))))
+      ;; Four bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx  (U+10000–U+10FFFF)
+      ((= (logand b0 #xF8) #xF0)
+       (let* ((b1 (%read-next-byte s))
+              (b2 (%read-next-byte s))
+              (b3 (%read-next-byte s)))
+         (unless (and b1 b2 b3) (error "Truncated UTF-8 four-byte sequence"))
+         (code-char (logior (ash (logand b0 #x07) 18)
+                            (ash (logand b1 #x3F) 12)
+                            (ash (logand b2 #x3F) 6)
+                            (logand b3 #x3F)))))
+      (t
+       (error "Invalid UTF-8 leading byte: #x~X" b0)))))
+
+(defmethod stream-read-char ((s utf-8-decoding-stream))
+  (let ((back (%char-back s)))
+    (if back
+        (progn (setf (%char-back s) nil) back)
+        (%decode-utf-8-char s))))
+
+(defmethod stream-unread-char ((s utf-8-decoding-stream) ch)
+  (setf (%char-back s) ch)
+  nil)
+
+(defmethod stream-peek-char ((s utf-8-decoding-stream))
+  (let ((ch (stream-read-char s)))
+    (unless (eq ch :eof)
+      (setf (%char-back s) ch))
+    ch))
+
+(defun make-utf-8-decoding-stream (binary-stream)
+  "Wrap BINARY-STREAM (an octet input stream) in a UTF-8 decoding Gray stream.
+If the stream begins with the UTF-8 BOM (0xEF 0xBB 0xBF), the BOM is consumed
+and discarded.  Returns the new UTF-8-DECODING-STREAM."
+  (let* ((s  (make-instance 'utf-8-decoding-stream :source binary-stream))
+         (b0 (read-byte binary-stream nil nil))
+         (b1 (when b0 (read-byte binary-stream nil nil)))
+         (b2 (when b1 (read-byte binary-stream nil nil))))
+    (if (and b0 (= b0 #xEF) b1 (= b1 #xBB) b2 (= b2 #xBF))
+        s                                    ; BOM consumed — stream is ready
+        ;; Not a BOM: push any bytes we peeked back into the byte buffer.
+        (progn
+          (setf (%byte-buf s) (remove nil (list b0 b1 b2)))
+          s))))
+
+;;; Encoding resolution — XML 1.0 §4.3.3
+
+(defun parse-xml-decl-encoding (data)
+  "Scan the pseudo-attribute list DATA (the body of an <?xml ...?> PI) for an
+'encoding' pseudo-attribute and return its value string, or NIL if absent.
+DATA is the raw data string of the xml PI, e.g. \"version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"\"."
+  (with-input-from-string (s data)
+    (loop
+      (skip-whitespace s)
+      (when (null (peek-char nil s nil nil))
+        (return nil))
+      (let ((name (parse-name s)))
+        (skip-whitespace s)
+        ;; Expect '=' — stop on malformed input.
+        (unless (eql (peek-char nil s nil nil) #\=)
+          (return nil))
+        (read-char s)                       ; consume '='
+        (skip-whitespace s)
+        (let ((value (parse-attribute-value s)))
+          (when (string= name "encoding")
+            (return value)))))))
+
+(defun resolve-encoding (name)
+  "Validate and normalise the encoding NAME from an XML declaration.
+Returns :UTF-8 for NIL (absent, i.e. the XML default) and for \"UTF-8\"
+(case-insensitive).  Signals an error for any other encoding, as only UTF-8
+is currently supported."
+  (cond
+    ((null name)               :utf-8)
+    ((string-equal name "utf-8") :utf-8)
+    (t (error "Unsupported XML encoding: ~s (only UTF-8 is currently supported)"
+              name))))
+
 ;;; SAX-based document prolog — XML 1.0 §2.8
 
 (defun parse-prolog-sax (stream handler)
@@ -522,6 +648,9 @@ skipped.  Leaves STREAM positioned at the '<' of the root element."
         ((eql next #\?)
          (read-char stream)             ; consume '?'
          (let ((pi-node (parse-pi stream)))
+           (when (string= (xml-pi-target pi-node) "xml")
+             (resolve-encoding
+              (parse-xml-decl-encoding (xml-pi-data pi-node))))
            (processing-instruction handler
                                    (xml-pi-target pi-node)
                                    (xml-pi-data pi-node))))
@@ -554,8 +683,14 @@ skipped.  Leaves STREAM positioned at the '<' of the root element."
 ;;; Public API
 
 (defun parse-xml (input &key (handler (make-instance 'dom-builder)))
-  "Parse INPUT (a string, standard character stream, or trivial-gray-streams
-character stream) as an XML document using a SAX-style event handler.
+  "Parse INPUT (a string, character stream, binary octet stream, or
+trivial-gray-streams character stream) as an XML document using a SAX-style
+event handler.
+
+When INPUT is a binary (octet) stream, its bytes are decoded as UTF-8.  A
+leading UTF-8 BOM (0xEF 0xBB 0xBF) is silently consumed.  An encoding
+pseudo-attribute in the XML declaration is validated; only UTF-8 (and the
+absent/default case, which also means UTF-8) is currently supported.
 
 When called without a HANDLER keyword argument, uses the built-in DOM-BUILDER
 handler and returns an XML-DOCUMENT node (backward-compatible behaviour).
@@ -572,7 +707,10 @@ before CHARACTERS and attribute values are reported."
   (let ((stream (etypecase input
                   (string (make-string-input-stream input))
                   (fundamental-character-input-stream input)
-                  (stream input))))
+                  (stream
+                   (if (subtypep (stream-element-type input) '(unsigned-byte 8))
+                       (make-utf-8-decoding-stream input)
+                       input)))))
     (start-document handler)
     (parse-prolog-sax stream handler)
     (unless (eql (peek-char nil stream nil nil) #\<)

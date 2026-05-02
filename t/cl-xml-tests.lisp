@@ -501,3 +501,121 @@
     (is (string= "el" (cl-xml:xml-node-tag root)))
     (is (equal '(("key" . "v")) (cl-xml:xml-node-attributes root)))
     (is (string= "hello" (first (cl-xml:xml-node-children root))))))
+
+;;; ── Binary octet-stream helper ────────────────────────────────────────────
+
+;;; Gray binary stream backed by a fixed octet vector.
+(defclass octet-input-stream (fundamental-binary-input-stream)
+  ((data :initarg :data :reader %ois-data)
+   (pos  :initform 0   :accessor %ois-pos)))
+
+(defmethod stream-element-type ((s octet-input-stream))
+  '(unsigned-byte 8))
+
+(defmethod stream-read-byte ((s octet-input-stream))
+  (if (< (%ois-pos s) (length (%ois-data s)))
+      (prog1 (aref (%ois-data s) (%ois-pos s))
+             (incf (%ois-pos s)))
+      :eof))
+
+(defun make-octet-stream (octets)
+  "Wrap OCTETS (a sequence of (unsigned-byte 8)) in an OCTET-INPUT-STREAM."
+  (make-instance 'octet-input-stream
+                 :data (coerce octets '(vector (unsigned-byte 8)))))
+
+(defun string-to-utf-8-octets (string)
+  "Encode STRING to a vector of UTF-8 (unsigned-byte 8) octets."
+  (let ((buf (make-array (length string)
+                         :element-type '(unsigned-byte 8)
+                         :adjustable t :fill-pointer 0)))
+    (loop for ch across string
+          for code = (char-code ch)
+          do (cond
+               ((< code #x80)
+                (vector-push-extend code buf))
+               ((< code #x800)
+                (vector-push-extend (logior #xC0 (ash code -6)) buf)
+                (vector-push-extend (logior #x80 (logand code #x3F)) buf))
+               ((< code #x10000)
+                (vector-push-extend (logior #xE0 (ash code -12)) buf)
+                (vector-push-extend (logior #x80 (logand (ash code -6) #x3F)) buf)
+                (vector-push-extend (logior #x80 (logand code #x3F)) buf))
+               (t
+                (vector-push-extend (logior #xF0 (ash code -18)) buf)
+                (vector-push-extend (logior #x80 (logand (ash code -12) #x3F)) buf)
+                (vector-push-extend (logior #x80 (logand (ash code -6) #x3F)) buf)
+                (vector-push-extend (logior #x80 (logand code #x3F)) buf))))
+    (copy-seq buf)))
+
+;;; ── Encoding resolution tests ─────────────────────────────────────────────
+
+(test binary-stream-ascii
+  "parse-xml accepts an octet stream containing ASCII-range UTF-8 XML."
+  (let* ((octets (string-to-utf-8-octets "<tag attr=\"val\">text</tag>"))
+         (stream (make-octet-stream octets))
+         (root   (cl-xml:xml-document-root (cl-xml:parse-xml stream))))
+    (is (string= "tag" (cl-xml:xml-node-tag root)))
+    (is (equal '(("attr" . "val")) (cl-xml:xml-node-attributes root)))
+    (is (string= "text" (first (cl-xml:xml-node-children root))))))
+
+(test binary-stream-utf-8-bom
+  "A UTF-8 BOM at the start of a binary stream is silently consumed."
+  (let* ((octets (concatenate '(vector (unsigned-byte 8))
+                              #(#xEF #xBB #xBF)
+                              (string-to-utf-8-octets "<root />")))
+         (doc (cl-xml:parse-xml (make-octet-stream octets))))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test binary-stream-utf-8-multibyte
+  "Multibyte UTF-8 sequences in a binary stream are decoded correctly.
+<el>é</el>: é (U+00E9) encodes to bytes 0xC3 0xA9 in UTF-8."
+  ;; Bytes: <el>      é            </el>
+  ;;        60 101 108 62  195 169  60 47 101 108 62
+  (let* ((octets (coerce '(60 101 108 62 195 169 60 47 101 108 62)
+                         '(vector (unsigned-byte 8))))
+         (root   (cl-xml:xml-document-root
+                  (cl-xml:parse-xml (make-octet-stream octets)))))
+    (is (string= "el" (cl-xml:xml-node-tag root)))
+    (is (= 1 (length (cl-xml:xml-node-children root))))
+    (is (string= (string (code-char #x00E9))
+                 (first (cl-xml:xml-node-children root))))))
+
+(test encoding-declaration-utf-8-accepted
+  "encoding=\"UTF-8\" in the XML declaration is accepted without error."
+  (let ((doc (cl-xml:parse-xml
+              "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root"
+                 (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test encoding-declaration-utf-8-case-insensitive
+  "encoding=\"utf-8\" (lowercase) is also accepted."
+  (let ((doc (cl-xml:parse-xml
+              "<?xml version=\"1.0\" encoding=\"utf-8\"?><root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root"
+                 (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test encoding-declaration-absent-accepted
+  "An XML declaration with no encoding attribute uses the UTF-8 default."
+  (let ((doc (cl-xml:parse-xml "<?xml version=\"1.0\"?><root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root"
+                 (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test encoding-declaration-unsupported-errors
+  "An unsupported encoding in the XML declaration signals an error."
+  (signals error
+    (cl-xml:parse-xml
+     "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><root />")))
+
+(test binary-stream-with-encoding-declaration
+  "A binary stream carrying an XML declaration with encoding=\"UTF-8\" is parsed."
+  (let* ((xml    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root />")
+         (octets (string-to-utf-8-octets xml))
+         (doc    (cl-xml:parse-xml (make-octet-stream octets))))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root"
+                 (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
