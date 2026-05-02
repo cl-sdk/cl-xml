@@ -464,3 +464,13 @@
     (let ((root (cl-xml:xml-document-root doc)))
       (is (string= "root" (cl-xml:xml-node-tag root)))
       (is (= 1 (length (cl-xml:xml-node-children root)))))))
+
+;;; ── Stream input ──────────────────────────────────────────────────────────
+
+(test parse-xml-accepts-stream
+  "parse-xml accepts a character stream in addition to a string."
+  (let* ((stream (make-string-input-stream "<tag attr=\"val\">text</tag>"))
+         (root   (cl-xml:xml-document-root (cl-xml:parse-xml stream))))
+    (is (string= "tag" (cl-xml:xml-node-tag root)))
+    (is (equal '(("attr" . "val")) (cl-xml:xml-node-attributes root)))
+    (is (string= "text" (first (cl-xml:xml-node-children root))))))
