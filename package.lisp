@@ -14,6 +14,33 @@
    #:make-xml-dtd-element
    #:xml-dtd-element-name
    #:xml-dtd-element-content-model
+   ;; DTD attribute definition
+   #:xml-dtd-att-def
+   #:xml-dtd-att-def-p
+   #:make-xml-dtd-att-def
+   #:xml-dtd-att-def-name
+   #:xml-dtd-att-def-type
+   #:xml-dtd-att-def-default
+   ;; DTD ATTLIST declaration
+   #:xml-dtd-attlist
+   #:xml-dtd-attlist-p
+   #:make-xml-dtd-attlist
+   #:xml-dtd-attlist-element-name
+   #:xml-dtd-attlist-definitions
+   ;; DTD ENTITY declaration
+   #:xml-dtd-entity
+   #:xml-dtd-entity-p
+   #:make-xml-dtd-entity
+   #:xml-dtd-entity-name
+   #:xml-dtd-entity-parameter-p
+   #:xml-dtd-entity-definition
+   ;; DTD NOTATION declaration
+   #:xml-dtd-notation
+   #:xml-dtd-notation-p
+   #:make-xml-dtd-notation
+   #:xml-dtd-notation-name
+   #:xml-dtd-notation-public-id
+   #:xml-dtd-notation-system-id
    ;; DOCTYPE declaration
    #:xml-doctype
    #:xml-doctype-p
@@ -22,6 +49,9 @@
    #:xml-doctype-public-id
    #:xml-doctype-system-id
    #:xml-doctype-elements
+   #:xml-doctype-attlists
+   #:xml-doctype-entities
+   #:xml-doctype-notations
    ;; Element
    #:xml-node
    #:xml-node-p

@@ -838,16 +838,19 @@
                (cl-xml:xml-dtd-element-content-model (first elems))))
     (is (eq :empty (cl-xml:xml-dtd-element-content-model (third elems))))))
 
-(test dtd-attlist-skipped
-  "<!ATTLIST> declarations in the internal subset are silently skipped."
-  (let ((elems (parse-doctype-elements
+(test dtd-attlist-coexists-with-element
+  "<!ATTLIST> declaration does not interfere with <!ELEMENT> parsing."
+  (let* ((dtd (cl-xml:xml-document-doctype
+               (cl-xml:parse-xml
                 (concatenate 'string
                   "<!DOCTYPE root ["
                   "<!ELEMENT root EMPTY>"
                   "<!ATTLIST root id ID #REQUIRED>"
                   "]><root />"))))
+         (elems (cl-xml:xml-doctype-elements dtd)))
     (is (= 1 (length elems)))
-    (is (string= "root" (cl-xml:xml-dtd-element-name (first elems))))))
+    (is (string= "root" (cl-xml:xml-dtd-element-name (first elems))))
+    (is (= 1 (length (cl-xml:xml-doctype-attlists dtd))))))
 
 (test dtd-comment-in-subset-skipped
   "Comments inside the internal subset are silently skipped."
@@ -886,4 +889,369 @@
     ;; no-op is used; the event must not crash and the rest must parse.
     (is (listp result))
     (is (some (lambda (e) (equal '(:start-element "root" nil) e)) result))))
+
+;;; ── DTD ATTLIST parsing ───────────────────────────────────────────────────
+
+(defun parse-doctype-attlists (str)
+  "Parse STR and return the list of xml-dtd-attlist structs from the DOCTYPE."
+  (cl-xml:xml-doctype-attlists
+   (cl-xml:xml-document-doctype (cl-xml:parse-xml str))))
+
+;;; xml-dtd-att-def struct
+
+(test dtd-att-def-struct
+  "xml-dtd-att-def struct has name, type, and default fields."
+  (let ((d (cl-xml:make-xml-dtd-att-def :name "id" :type :id :default :required)))
+    (is (cl-xml:xml-dtd-att-def-p d))
+    (is (string= "id" (cl-xml:xml-dtd-att-def-name d)))
+    (is (eq :id (cl-xml:xml-dtd-att-def-type d)))
+    (is (eq :required (cl-xml:xml-dtd-att-def-default d)))))
+
+;;; xml-dtd-attlist struct
+
+(test dtd-attlist-struct
+  "xml-dtd-attlist struct has element-name and definitions fields."
+  (let ((a (cl-xml:make-xml-dtd-attlist :element-name "root" :definitions '())))
+    (is (cl-xml:xml-dtd-attlist-p a))
+    (is (string= "root" (cl-xml:xml-dtd-attlist-element-name a)))
+    (is (null (cl-xml:xml-dtd-attlist-definitions a)))))
+
+;;; xml-doctype-attlists accessor
+
+(test dtd-doctype-has-attlists
+  "xml-doctype-attlists returns NIL when no ATTLIST is present."
+  (let* ((dtd (cl-xml:xml-document-doctype
+               (cl-xml:parse-xml "<!DOCTYPE root><root />"))))
+    (is (null (cl-xml:xml-doctype-attlists dtd)))))
+
+;;; Tokenized attribute types
+
+(test dtd-attlist-cdata-required
+  "<!ATTLIST> with CDATA type and #REQUIRED default is parsed correctly."
+  (let* ((alists (parse-doctype-attlists
+                  "<!DOCTYPE root [<!ATTLIST root title CDATA #REQUIRED>]><root />"))
+         (al (first alists))
+         (def (first (cl-xml:xml-dtd-attlist-definitions al))))
+    (is (= 1 (length alists)))
+    (is (string= "root" (cl-xml:xml-dtd-attlist-element-name al)))
+    (is (string= "title" (cl-xml:xml-dtd-att-def-name def)))
+    (is (eq :cdata (cl-xml:xml-dtd-att-def-type def)))
+    (is (eq :required (cl-xml:xml-dtd-att-def-default def)))))
+
+(test dtd-attlist-id-implied
+  "<!ATTLIST> with ID type and #IMPLIED default is parsed correctly."
+  (let* ((alists (parse-doctype-attlists
+                  "<!DOCTYPE root [<!ATTLIST root id ID #IMPLIED>]><root />"))
+         (def (first (cl-xml:xml-dtd-attlist-definitions (first alists)))))
+    (is (eq :id (cl-xml:xml-dtd-att-def-type def)))
+    (is (eq :implied (cl-xml:xml-dtd-att-def-default def)))))
+
+(test dtd-attlist-idref-type
+  "<!ATTLIST> with IDREF type is parsed as :idref."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x IDREF #IMPLIED>]><r />"))))))
+    (is (eq :idref (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-idrefs-type
+  "<!ATTLIST> with IDREFS type is parsed as :idrefs."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x IDREFS #IMPLIED>]><r />"))))))
+    (is (eq :idrefs (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-entity-type
+  "<!ATTLIST> with ENTITY type is parsed as :entity."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x ENTITY #IMPLIED>]><r />"))))))
+    (is (eq :entity (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-entities-type
+  "<!ATTLIST> with ENTITIES type is parsed as :entities."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x ENTITIES #IMPLIED>]><r />"))))))
+    (is (eq :entities (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-nmtoken-type
+  "<!ATTLIST> with NMTOKEN type is parsed as :nmtoken."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x NMTOKEN #IMPLIED>]><r />"))))))
+    (is (eq :nmtoken (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-nmtokens-type
+  "<!ATTLIST> with NMTOKENS type is parsed as :nmtokens."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r x NMTOKENS #IMPLIED>]><r />"))))))
+    (is (eq :nmtokens (cl-xml:xml-dtd-att-def-type def)))))
+
+;;; Enumerated and NOTATION types
+
+(test dtd-attlist-enumeration-type
+  "<!ATTLIST> with enumerated type is parsed as (:enumeration token+)."
+  (let* ((alists (parse-doctype-attlists
+                  "<!DOCTYPE r [<!ATTLIST r size (small|medium|large) \"medium\">]><r />"))
+         (def (first (cl-xml:xml-dtd-attlist-definitions (first alists)))))
+    (is (equal '(:enumeration "small" "medium" "large")
+               (cl-xml:xml-dtd-att-def-type def)))))
+
+(test dtd-attlist-notation-type
+  "<!ATTLIST> with NOTATION type is parsed as (:notation name+)."
+  (let* ((alists (parse-doctype-attlists
+                  "<!DOCTYPE r [<!ATTLIST r fmt NOTATION (gif|png) #IMPLIED>]><r />"))
+         (def (first (cl-xml:xml-dtd-attlist-definitions (first alists)))))
+    (is (equal '(:notation "gif" "png")
+               (cl-xml:xml-dtd-att-def-type def)))))
+
+;;; Default declarations
+
+(test dtd-attlist-fixed-default
+  "<!ATTLIST> with #FIXED AttValue is parsed as (:fixed value)."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r lang CDATA #FIXED \"en\">]><r />"))))))
+    (is (equal '(:fixed "en") (cl-xml:xml-dtd-att-def-default def)))))
+
+(test dtd-attlist-bare-default
+  "<!ATTLIST> with a bare AttValue is parsed as (:default value)."
+  (let* ((def (first (cl-xml:xml-dtd-attlist-definitions
+                      (first (parse-doctype-attlists
+                              "<!DOCTYPE r [<!ATTLIST r lang CDATA \"en\">]><r />"))))))
+    (is (equal '(:default "en") (cl-xml:xml-dtd-att-def-default def)))))
+
+;;; Multiple attribute definitions in one ATTLIST
+
+(test dtd-attlist-multiple-defs
+  "Multiple AttDef entries in one <!ATTLIST> declaration are all captured."
+  (let* ((al (first (parse-doctype-attlists
+                     (concatenate 'string
+                       "<!DOCTYPE r [<!ATTLIST r"
+                       "  id ID #REQUIRED"
+                       "  class CDATA #IMPLIED"
+                       "  lang CDATA \"en\">]><r />"))))
+         (defs (cl-xml:xml-dtd-attlist-definitions al)))
+    (is (= 3 (length defs)))
+    (is (string= "id"    (cl-xml:xml-dtd-att-def-name (first defs))))
+    (is (string= "class" (cl-xml:xml-dtd-att-def-name (second defs))))
+    (is (string= "lang"  (cl-xml:xml-dtd-att-def-name (third defs))))))
+
+;;; Multiple ATTLIST declarations
+
+(test dtd-multiple-attlists
+  "Multiple <!ATTLIST> declarations are captured in order."
+  (let* ((alists (parse-doctype-attlists
+                  (concatenate 'string
+                    "<!DOCTYPE r [<!ATTLIST r id ID #REQUIRED>"
+                    "<!ATTLIST p class CDATA #IMPLIED>]><r />"))))
+    (is (= 2 (length alists)))
+    (is (string= "r" (cl-xml:xml-dtd-attlist-element-name (first alists))))
+    (is (string= "p" (cl-xml:xml-dtd-attlist-element-name (second alists))))))
+
+;;; ── DTD ENTITY parsing ────────────────────────────────────────────────────
+
+(defun parse-doctype-entities (str)
+  "Parse STR and return the list of xml-dtd-entity structs from the DOCTYPE."
+  (cl-xml:xml-doctype-entities
+   (cl-xml:xml-document-doctype (cl-xml:parse-xml str))))
+
+;;; xml-dtd-entity struct
+
+(test dtd-entity-struct
+  "xml-dtd-entity struct has name, parameter-p, and definition fields."
+  (let ((e (cl-xml:make-xml-dtd-entity :name "amp" :parameter-p nil
+                                        :definition "&")))
+    (is (cl-xml:xml-dtd-entity-p e))
+    (is (string= "amp" (cl-xml:xml-dtd-entity-name e)))
+    (is (null (cl-xml:xml-dtd-entity-parameter-p e)))
+    (is (string= "&" (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; Internal general entity
+
+(test dtd-entity-internal-general
+  "<!ENTITY name 'value'> is parsed as an internal general entity."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY greeting \"Hello\">]><r />"))
+         (e (first ents)))
+    (is (= 1 (length ents)))
+    (is (string= "greeting" (cl-xml:xml-dtd-entity-name e)))
+    (is (null (cl-xml:xml-dtd-entity-parameter-p e)))
+    (is (string= "Hello" (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; Internal parameter entity
+
+(test dtd-entity-internal-parameter
+  "<!ENTITY % name 'value'> is parsed as an internal parameter entity."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY % inline \"(#PCDATA)\">]><r />"))
+         (e (first ents)))
+    (is (= 1 (length ents)))
+    (is (string= "inline" (cl-xml:xml-dtd-entity-name e)))
+    (is (cl-xml:xml-dtd-entity-parameter-p e))
+    (is (string= "(#PCDATA)" (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; External general entity — SYSTEM
+
+(test dtd-entity-external-system
+  "<!ENTITY name SYSTEM 'uri'> is parsed as an external entity."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY logo SYSTEM \"logo.png\">]><r />"))
+         (e (first ents)))
+    (is (equal '(:external nil "logo.png") (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; External general entity — PUBLIC
+
+(test dtd-entity-external-public
+  "<!ENTITY name PUBLIC 'pub' 'sys'> is parsed with both identifiers."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY iso PUBLIC \"-//ISO//EN\" \"iso.ent\">]><r />"))
+         (e (first ents)))
+    (is (equal '(:external "-//ISO//EN" "iso.ent")
+               (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; Unparsed (NDATA) entity
+
+(test dtd-entity-unparsed-ndata
+  "<!ENTITY name SYSTEM 'uri' NDATA fmt> is parsed as an unparsed entity."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY logo SYSTEM \"logo.gif\" NDATA gif>]><r />"))
+         (e (first ents)))
+    (is (equal '(:unparsed nil "logo.gif" "gif")
+               (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; External parameter entity
+
+(test dtd-entity-external-parameter
+  "<!ENTITY % name SYSTEM 'uri'> is parsed as an external parameter entity."
+  (let* ((ents (parse-doctype-entities
+                "<!DOCTYPE r [<!ENTITY % common SYSTEM \"common.ent\">]><r />"))
+         (e (first ents)))
+    (is (cl-xml:xml-dtd-entity-parameter-p e))
+    (is (equal '(:external nil "common.ent")
+               (cl-xml:xml-dtd-entity-definition e)))))
+
+;;; Multiple entities
+
+(test dtd-multiple-entities
+  "Multiple <!ENTITY> declarations are captured in order."
+  (let* ((ents (parse-doctype-entities
+                (concatenate 'string
+                  "<!DOCTYPE r ["
+                  "<!ENTITY a \"first\">"
+                  "<!ENTITY b \"second\">"
+                  "]><r />"))))
+    (is (= 2 (length ents)))
+    (is (string= "a" (cl-xml:xml-dtd-entity-name (first ents))))
+    (is (string= "b" (cl-xml:xml-dtd-entity-name (second ents))))))
+
+;;; ── DTD NOTATION parsing ──────────────────────────────────────────────────
+
+(defun parse-doctype-notations (str)
+  "Parse STR and return the list of xml-dtd-notation structs from the DOCTYPE."
+  (cl-xml:xml-doctype-notations
+   (cl-xml:xml-document-doctype (cl-xml:parse-xml str))))
+
+;;; xml-dtd-notation struct
+
+(test dtd-notation-struct
+  "xml-dtd-notation struct has name, public-id, and system-id fields."
+  (let ((n (cl-xml:make-xml-dtd-notation :name "gif" :public-id nil
+                                          :system-id "image/gif")))
+    (is (cl-xml:xml-dtd-notation-p n))
+    (is (string= "gif" (cl-xml:xml-dtd-notation-name n)))
+    (is (null (cl-xml:xml-dtd-notation-public-id n)))
+    (is (string= "image/gif" (cl-xml:xml-dtd-notation-system-id n)))))
+
+;;; NOTATION with SYSTEM identifier
+
+(test dtd-notation-system
+  "<!NOTATION name SYSTEM 'uri'> records system-id and nil public-id."
+  (let* ((notations (parse-doctype-notations
+                     "<!DOCTYPE r [<!NOTATION gif SYSTEM \"image/gif\">]><r />"))
+         (n (first notations)))
+    (is (= 1 (length notations)))
+    (is (string= "gif"       (cl-xml:xml-dtd-notation-name n)))
+    (is (null               (cl-xml:xml-dtd-notation-public-id n)))
+    (is (string= "image/gif" (cl-xml:xml-dtd-notation-system-id n)))))
+
+;;; NOTATION with PUBLIC + SYSTEM identifiers (ExternalID)
+
+(test dtd-notation-public-and-system
+  "<!NOTATION name PUBLIC 'pub' 'sys'> records both identifiers."
+  (let* ((notations (parse-doctype-notations
+                     "<!DOCTYPE r [<!NOTATION jpeg PUBLIC \"-//JPEG//\" \"image/jpeg\">]><r />"))
+         (n (first notations)))
+    (is (string= "-//JPEG//"   (cl-xml:xml-dtd-notation-public-id n)))
+    (is (string= "image/jpeg"  (cl-xml:xml-dtd-notation-system-id n)))))
+
+;;; NOTATION with PUBLIC only (PublicID — no system literal)
+
+(test dtd-notation-public-only
+  "<!NOTATION name PUBLIC 'pub'> with no system literal records nil system-id."
+  (let* ((notations (parse-doctype-notations
+                     "<!DOCTYPE r [<!NOTATION pdf PUBLIC \"-//Adobe//PDF\">]><r />"))
+         (n (first notations)))
+    (is (string= "-//Adobe//PDF" (cl-xml:xml-dtd-notation-public-id n)))
+    (is (null (cl-xml:xml-dtd-notation-system-id n)))))
+
+;;; Multiple notations
+
+(test dtd-multiple-notations
+  "Multiple <!NOTATION> declarations are captured in order."
+  (let* ((notations (parse-doctype-notations
+                     (concatenate 'string
+                       "<!DOCTYPE r ["
+                       "<!NOTATION gif SYSTEM \"image/gif\">"
+                       "<!NOTATION png SYSTEM \"image/png\">"
+                       "]><r />"))))
+    (is (= 2 (length notations)))
+    (is (string= "gif" (cl-xml:xml-dtd-notation-name (first notations))))
+    (is (string= "png" (cl-xml:xml-dtd-notation-name (second notations))))))
+
+;;; ── All DTD declaration types together ────────────────────────────────────
+
+(test dtd-all-declaration-types
+  "DOCTYPE internal subset with ELEMENT, ATTLIST, ENTITY, and NOTATION all parsed."
+  (let* ((dtd (cl-xml:xml-document-doctype
+               (cl-xml:parse-xml
+                (concatenate 'string
+                  "<!DOCTYPE root ["
+                  "<!ELEMENT root (title, body)>"
+                  "<!ATTLIST root id ID #REQUIRED>"
+                  "<!ENTITY copyright \"(c) 2024\">"
+                  "<!NOTATION svg SYSTEM \"image/svg+xml\">"
+                  "]><root/>")))))
+    (is (= 1 (length (cl-xml:xml-doctype-elements dtd))))
+    (is (= 1 (length (cl-xml:xml-doctype-attlists dtd))))
+    (is (= 1 (length (cl-xml:xml-doctype-entities dtd))))
+    (is (= 1 (length (cl-xml:xml-doctype-notations dtd))))
+    (is (string= "root"
+                 (cl-xml:xml-dtd-element-name
+                  (first (cl-xml:xml-doctype-elements dtd)))))
+    (is (string= "root"
+                 (cl-xml:xml-dtd-attlist-element-name
+                  (first (cl-xml:xml-doctype-attlists dtd)))))
+    (is (string= "copyright"
+                 (cl-xml:xml-dtd-entity-name
+                  (first (cl-xml:xml-doctype-entities dtd)))))
+    (is (string= "svg"
+                 (cl-xml:xml-dtd-notation-name
+                  (first (cl-xml:xml-doctype-notations dtd)))))))
+
+;;; PE references between declarations are tolerated
+
+(test dtd-pe-reference-between-decls
+  "Parameter entity references between markup declarations do not cause errors."
+  (let* ((dtd (cl-xml:xml-document-doctype
+               (cl-xml:parse-xml
+                (concatenate 'string
+                  "<!DOCTYPE root ["
+                  "<!ENTITY % ignored \"whatever\">"
+                  "%ignored;"
+                  "<!ELEMENT root EMPTY>"
+                  "]><root />")))))
+    ;; The PE reference is skipped; ELEMENT is still parsed
+    (is (= 1 (length (cl-xml:xml-doctype-elements dtd))))))
 

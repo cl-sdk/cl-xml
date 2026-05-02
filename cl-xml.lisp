@@ -51,16 +51,75 @@ A content-particle is one of:
   name
   content-model)
 
+(defstruct xml-dtd-att-def
+  "Represents a single attribute definition within a DTD <!ATTLIST> declaration.
+NAME is the attribute name string.
+TYPE is the attribute type:
+  :cdata              — string type (CDATA)
+  :id                 — tokenized type (ID)
+  :idref              — tokenized type (IDREF)
+  :idrefs             — tokenized type (IDREFS)
+  :entity             — tokenized type (ENTITY)
+  :entities           — tokenized type (ENTITIES)
+  :nmtoken            — tokenized type (NMTOKEN)
+  :nmtokens           — tokenized type (NMTOKENS)
+  (:notation n+)      — NOTATION enumeration: list of name strings
+  (:enumeration tok+) — enumeration of Nmtoken strings
+DEFAULT is the default declaration:
+  :required           — #REQUIRED
+  :implied            — #IMPLIED
+  (:fixed value)      — #FIXED AttValue
+  (:default value)    — bare AttValue (no keyword prefix)"
+  name
+  type
+  default)
+
+(defstruct xml-dtd-attlist
+  "Represents a DTD <!ATTLIST> declaration.
+ELEMENT-NAME is the element type name string this declaration applies to.
+DEFINITIONS is a list of xml-dtd-att-def structs in document order."
+  element-name
+  definitions)
+
+(defstruct xml-dtd-entity
+  "Represents a DTD <!ENTITY> declaration.
+NAME is the entity name string.
+PARAMETER-P is T for a parameter entity (<!ENTITY % name …>), NIL otherwise.
+DEFINITION is the entity definition:
+  string                    — internal entity; the replacement text (raw, unexpanded)
+  (:external pub sys)       — external parsed entity; pub is the public identifier
+                               string or NIL, sys is the system identifier string
+  (:unparsed pub sys ndata) — external unparsed entity; ndata is the NDATA name"
+  name
+  parameter-p
+  definition)
+
+(defstruct xml-dtd-notation
+  "Represents a DTD <!NOTATION> declaration (XML 1.0 §4.7).
+NAME is the notation name string.
+PUBLIC-ID is the public identifier string, or NIL.
+SYSTEM-ID is the system identifier string, or NIL.
+At least one of PUBLIC-ID or SYSTEM-ID is non-NIL."
+  name
+  public-id
+  system-id)
+
 (defstruct xml-doctype
   "Represents a parsed DOCTYPE declaration.
 NAME is the root element type name string.
 PUBLIC-ID is the public identifier string, or NIL.
 SYSTEM-ID is the system identifier string, or NIL.
-ELEMENTS is a list of xml-dtd-element structs parsed from the internal subset."
+ELEMENTS is a list of xml-dtd-element structs from the internal subset.
+ATTLISTS is a list of xml-dtd-attlist structs from the internal subset.
+ENTITIES is a list of xml-dtd-entity structs from the internal subset.
+NOTATIONS is a list of xml-dtd-notation structs from the internal subset."
   name
   public-id
   system-id
-  elements)
+  elements
+  attlists
+  entities
+  notations)
 
 (defstruct xml-qname
   "Represents a namespace-qualified XML name (Namespaces in XML 1.0 §2.1).
@@ -275,7 +334,228 @@ Returns an xml-pi node."
             (t
              (vector-push-extend ch buf))))))))
 
-;;; DTD content-model parsing — XML 1.0 §3.2
+;;; DTD Nmtoken — XML 1.0 §2.3
+
+(defun %parse-dtd-nmtoken (stream)
+  "Parse an XML Nmtoken — one or more NameChar characters.
+Unlike parse-name, the first character need not be a NameStartChar.
+Returns the token as a string."
+  (let ((buf (make-array 4 :element-type 'character :adjustable t :fill-pointer 0)))
+    (let ((first-ch (peek-char nil stream nil nil)))
+      (unless (and first-ch (name-char-p first-ch))
+        (error "Invalid Nmtoken: expected at least one NameChar")))
+    (loop while (let ((ch (peek-char nil stream nil nil)))
+                  (and ch (name-char-p ch)))
+          do (vector-push-extend (read-char stream) buf))
+    (copy-seq buf)))
+
+;;; DTD AttType parsing — XML 1.0 §3.3.1
+
+(defun %parse-dtd-att-type (stream)
+  "Parse an AttType (attribute type) from STREAM.
+Returns one of:
+  :cdata :id :idref :idrefs :entity :entities :nmtoken :nmtokens — keyword types
+  (:notation name+)      — NOTATION enumeration
+  (:enumeration token+)  — Nmtoken enumeration"
+  (skip-whitespace stream)
+  (let ((ch (peek-char nil stream nil nil)))
+    (if (eql ch #\()
+        ;; Enumeration: '(' S? Nmtoken (S? '|' S? Nmtoken)* S? ')'
+        (progn
+          (read-char stream)              ; consume '('
+          (skip-whitespace stream)
+          (let ((tokens (list (%parse-dtd-nmtoken stream))))
+            (skip-whitespace stream)
+            (loop while (eql (peek-char nil stream nil nil) #\|)
+                  do (read-char stream)   ; consume '|'
+                  do (skip-whitespace stream)
+                  do (push (%parse-dtd-nmtoken stream) tokens)
+                  do (skip-whitespace stream))
+            (unless (eql (peek-char nil stream nil nil) #\))
+              (error "Expected ')' in enumerated attribute type"))
+            (read-char stream)            ; consume ')'
+            (cons :enumeration (nreverse tokens))))
+        ;; Named type keyword or NOTATION
+        (let ((kw (parse-name stream)))
+          (cond
+            ((string= kw "CDATA")    :cdata)
+            ((string= kw "ID")       :id)
+            ((string= kw "IDREF")    :idref)
+            ((string= kw "IDREFS")   :idrefs)
+            ((string= kw "ENTITY")   :entity)
+            ((string= kw "ENTITIES") :entities)
+            ((string= kw "NMTOKEN")  :nmtoken)
+            ((string= kw "NMTOKENS") :nmtokens)
+            ((string= kw "NOTATION")
+             ;; NotationType: NOTATION S '(' S? Name (S? '|' S? Name)* S? ')'
+             (skip-whitespace stream)
+             (unless (eql (peek-char nil stream nil nil) #\()
+               (error "Expected '(' after NOTATION in attribute type"))
+             (read-char stream)           ; consume '('
+             (skip-whitespace stream)
+             (let ((names (list (parse-name stream))))
+               (skip-whitespace stream)
+               (loop while (eql (peek-char nil stream nil nil) #\|)
+                     do (read-char stream) ; consume '|'
+                     do (skip-whitespace stream)
+                     do (push (parse-name stream) names)
+                     do (skip-whitespace stream))
+               (unless (eql (peek-char nil stream nil nil) #\))
+                 (error "Expected ')' in NOTATION attribute type"))
+               (read-char stream)         ; consume ')'
+               (cons :notation (nreverse names))))
+            (t
+             (error "Unknown DTD attribute type '~a'" kw)))))))
+
+;;; DTD DefaultDecl parsing — XML 1.0 §3.3.2
+
+(defun %parse-dtd-att-default (stream)
+  "Parse a DefaultDecl from STREAM.
+Returns :required, :implied, (:fixed value), or (:default value)."
+  (let ((ch (peek-char nil stream nil nil)))
+    (if (eql ch #\#)
+        (progn
+          (read-char stream)              ; consume '#'
+          (let ((kw (parse-name stream)))
+            (cond
+              ((string= kw "REQUIRED") :required)
+              ((string= kw "IMPLIED")  :implied)
+              ((string= kw "FIXED")
+               (skip-whitespace stream)
+               (list :fixed (parse-attribute-value stream)))
+              (t
+               (error "Expected REQUIRED, IMPLIED, or FIXED after '#' in DTD default, got '#~a'" kw)))))
+        ;; Bare AttValue (no '#' keyword) — an implied default
+        (list :default (parse-attribute-value stream)))))
+
+;;; DTD ATTLIST declaration — XML 1.0 §3.3
+
+(defun %parse-dtd-attlist-decl (stream)
+  "Parse a DTD ATTLIST declaration.
+STREAM must be positioned just after 'ATTLIST' (whitespace not yet consumed).
+Consumes through and including the closing '>'.
+Returns an xml-dtd-attlist struct."
+  (skip-whitespace stream)
+  (let ((element-name (parse-name stream))
+        (definitions '()))
+    (loop
+      (skip-whitespace stream)
+      (let ((ch (peek-char nil stream nil nil)))
+        (cond
+          ((null ch)    (error "Unterminated DTD ATTLIST declaration"))
+          ((eql ch #\>) (read-char stream) (return))   ; consume '>' and exit
+          (t
+           (let* ((att-name    (parse-name stream))
+                  (dummy1      (skip-whitespace stream))
+                  (att-type    (%parse-dtd-att-type stream))
+                  (dummy2      (skip-whitespace stream))
+                  (att-default (%parse-dtd-att-default stream)))
+             (declare (ignore dummy1 dummy2))
+             (push (make-xml-dtd-att-def :name    att-name
+                                         :type    att-type
+                                         :default att-default)
+                   definitions))))))
+    (make-xml-dtd-attlist :element-name element-name
+                          :definitions  (nreverse definitions))))
+
+;;; DTD ENTITY declaration — XML 1.0 §4.2
+
+(defun %parse-dtd-entity-decl (stream)
+  "Parse a DTD ENTITY declaration (general or parameter, internal or external).
+STREAM must be positioned just after 'ENTITY' (whitespace not yet consumed).
+Consumes through and including the closing '>'.
+Returns an xml-dtd-entity struct.
+
+DEFINITION field of the returned struct:
+  string                    — internal entity; the raw replacement text
+  (:external pub sys)       — external parsed entity
+  (:unparsed pub sys ndata) — external unparsed entity (general entities with NDATA)"
+  (skip-whitespace stream)
+  ;; Optional '%' marks a parameter entity
+  (let ((parameter-p (eql (peek-char nil stream nil nil) #\%)))
+    (when parameter-p
+      (read-char stream)                ; consume '%'
+      (skip-whitespace stream))         ; required S between '%' and Name
+    (let ((name (parse-name stream)))
+      (skip-whitespace stream)
+      (let* ((next (peek-char nil stream nil nil))
+             (definition
+               (cond
+                 ;; Internal entity: EntityValue (single- or double-quoted)
+                 ((member next '(#\" #\') :test #'eql)
+                  (%parse-dtd-quoted-string stream))
+                 ;; External entity: SYSTEM or PUBLIC keyword
+                 ((and next (name-start-char-p next))
+                  (let ((keyword (parse-name stream)))
+                    (cond
+                      ((string= keyword "SYSTEM")
+                       (skip-whitespace stream)
+                       (list :external nil (%parse-dtd-quoted-string stream)))
+                      ((string= keyword "PUBLIC")
+                       (skip-whitespace stream)
+                       (let ((pub (%parse-dtd-quoted-string stream)))
+                         (skip-whitespace stream)
+                         (list :external pub (%parse-dtd-quoted-string stream))))
+                      (t
+                       (error "Expected SYSTEM, PUBLIC, or quoted value in entity declaration, got '~a'"
+                              keyword)))))
+                 (t
+                  (error "Expected entity value or external identifier in entity declaration")))))
+        ;; For external general entities, check for optional NDATA clause
+        (skip-whitespace stream)
+        (when (and (not parameter-p)
+                   (consp definition)
+                   (eq (car definition) :external))
+          (let ((ch (peek-char nil stream nil nil)))
+            (when (and ch (name-start-char-p ch))
+              (let ((kw (parse-name stream)))
+                (unless (string= kw "NDATA")
+                  (error "Expected 'NDATA' or '>' in external entity declaration, got '~a'" kw))
+                (skip-whitespace stream)
+                (let ((ndata-name (parse-name stream)))
+                  (setf definition
+                        (list :unparsed (second definition) (third definition) ndata-name))
+                  (skip-whitespace stream))))))
+        (unless (eql (read-char stream nil nil) #\>)
+          (error "Expected '>' to close DTD ENTITY declaration for '~a'" name))
+        (make-xml-dtd-entity :name        name
+                              :parameter-p parameter-p
+                              :definition  definition)))))
+
+;;; DTD NOTATION declaration — XML 1.0 §4.7
+
+(defun %parse-dtd-notation-decl (stream)
+  "Parse a DTD NOTATION declaration.
+STREAM must be positioned just after 'NOTATION' (whitespace not yet consumed).
+Consumes through and including the closing '>'.
+Returns an xml-dtd-notation struct."
+  (skip-whitespace stream)
+  (let ((name (parse-name stream)))
+    (skip-whitespace stream)
+    (let ((keyword (parse-name stream)))
+      (multiple-value-bind (public-id system-id)
+          (cond
+            ((string= keyword "SYSTEM")
+             (skip-whitespace stream)
+             (values nil (%parse-dtd-quoted-string stream)))
+            ((string= keyword "PUBLIC")
+             (skip-whitespace stream)
+             (let ((pub (%parse-dtd-quoted-string stream)))
+               ;; System literal is optional in NOTATION (PublicID context)
+               (skip-whitespace stream)
+               (let ((sys (when (member (peek-char nil stream nil nil) '(#\" #\'))
+                            (%parse-dtd-quoted-string stream))))
+                 (values pub sys))))
+            (t
+             (error "Expected SYSTEM or PUBLIC in NOTATION declaration, got '~a'" keyword)))
+        (skip-whitespace stream)
+        (unless (eql (read-char stream nil nil) #\>)
+          (error "Expected '>' to close DTD NOTATION declaration for '~a'" name))
+        (make-xml-dtd-notation :name      name
+                                :public-id public-id
+                                :system-id system-id)))))
+
+
 
 (defun %parse-dtd-quoted-string (stream)
   "Parse a quoted string (single- or double-quoted) for DOCTYPE external identifiers.
@@ -453,8 +733,8 @@ Returns an xml-dtd-element struct."
   "Parse the internal subset of a DOCTYPE declaration.
 STREAM is positioned just after '['.
 Consumes through and including the closing ']'.
-Returns a list of xml-dtd-element structs."
-  (let ((elements '()))
+Returns (values elements attlists entities notations)."
+  (let (elements attlists entities notations)
     (loop
       (skip-whitespace stream)
       (let ((ch (peek-char nil stream nil nil)))
@@ -463,7 +743,17 @@ Returns a list of xml-dtd-element structs."
           ;; End of internal subset
           ((char= ch #\])
            (read-char stream)            ; consume ']'
-           (return (nreverse elements)))
+           (return (values (nreverse elements)
+                           (nreverse attlists)
+                           (nreverse entities)
+                           (nreverse notations))))
+          ;; Parameter entity reference %name; — skip (PE refs between declarations
+          ;; are legal in the internal subset but we do not expand them)
+          ((char= ch #\%)
+           (read-char stream)            ; consume '%'
+           (parse-name stream)           ; consume name
+           (unless (eql (read-char stream nil nil) #\;)
+             (error "Expected ';' after parameter entity name in DTD")))
           ;; Markup declaration or comment starting with '<'
           ((char= ch #\<)
            (read-char stream)            ; consume '<'
@@ -474,7 +764,7 @@ Returns a list of xml-dtd-element structs."
                ((char= next #\?)
                 (read-char stream)       ; consume '?'
                 (parse-pi stream))
-               ;; Markup declaration: <!ELEMENT, <!ATTLIST, <!ENTITY, <!NOTATION, <!--
+               ;; Markup declaration: <!
                ((char= next #\!)
                 (read-char stream)       ; consume '!'
                 (let ((after-bang (peek-char nil stream nil nil)))
@@ -492,9 +782,15 @@ Returns a list of xml-dtd-element structs."
                        (cond
                          ((string= decl-type "ELEMENT")
                           (push (%parse-dtd-element-decl stream) elements))
-                         ;; ATTLIST, ENTITY, NOTATION are skipped
+                         ((string= decl-type "ATTLIST")
+                          (push (%parse-dtd-attlist-decl stream) attlists))
+                         ((string= decl-type "ENTITY")
+                          (push (%parse-dtd-entity-decl stream) entities))
+                         ((string= decl-type "NOTATION")
+                          (push (%parse-dtd-notation-decl stream) notations))
                          (t
-                          (%skip-dtd-to-close-angle stream)))))
+                          (error "Unknown markup declaration type '~a' in DOCTYPE internal subset"
+                                 decl-type)))))
                     (t
                      (error "Unexpected '<!~a' in DOCTYPE internal subset"
                             (or after-bang ""))))))
@@ -512,7 +808,7 @@ Consumes through and including the closing '>'.
 Returns an xml-doctype struct."
   (skip-whitespace stream)
   (let ((name (parse-name stream))
-        public-id system-id elements)
+        public-id system-id elements attlists entities notations)
     (skip-whitespace stream)
     ;; Optional external identifier: SYSTEM or PUBLIC
     (let ((ch (peek-char nil stream nil nil)))
@@ -536,14 +832,18 @@ Returns an xml-doctype struct."
     ;; Optional internal subset
     (when (eql (peek-char nil stream nil nil) #\[)
       (read-char stream)                ; consume '['
-      (setf elements (%parse-dtd-internal-subset stream)))
+      (multiple-value-setq (elements attlists entities notations)
+        (%parse-dtd-internal-subset stream)))
     (skip-whitespace stream)
     (unless (eql (read-char stream nil nil) #\>)
       (error "Expected '>' to close DOCTYPE declaration"))
     (make-xml-doctype :name      name
                       :public-id public-id
                       :system-id system-id
-                      :elements  elements)))
+                      :elements  elements
+                      :attlists  attlists
+                      :entities  entities
+                      :notations notations)))
 
 ;;; Character data parsing — XML 1.0 §2.4
 
