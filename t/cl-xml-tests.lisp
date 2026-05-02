@@ -504,48 +504,15 @@
 
 ;;; ── Binary octet-stream helper ────────────────────────────────────────────
 
-;;; Gray binary stream backed by a fixed octet vector.
-(defclass octet-input-stream (fundamental-binary-input-stream)
-  ((data :initarg :data :reader %ois-data)
-   (pos  :initform 0   :accessor %ois-pos)))
-
-(defmethod stream-element-type ((s octet-input-stream))
-  '(unsigned-byte 8))
-
-(defmethod stream-read-byte ((s octet-input-stream))
-  (if (< (%ois-pos s) (length (%ois-data s)))
-      (prog1 (aref (%ois-data s) (%ois-pos s))
-             (incf (%ois-pos s)))
-      :eof))
-
 (defun make-octet-stream (octets)
-  "Wrap OCTETS (a sequence of (unsigned-byte 8)) in an OCTET-INPUT-STREAM."
-  (make-instance 'octet-input-stream
-                 :data (coerce octets '(vector (unsigned-byte 8)))))
+  "Wrap OCTETS (a (vector (unsigned-byte 8))) in a flexi-streams in-memory
+binary input stream suitable for passing directly to CL-XML:PARSE-XML."
+  (flexi-streams:make-in-memory-input-stream
+   (coerce octets '(vector (unsigned-byte 8)))))
 
 (defun string-to-utf-8-octets (string)
-  "Encode STRING to a vector of UTF-8 (unsigned-byte 8) octets."
-  (let ((buf (make-array (length string)
-                         :element-type '(unsigned-byte 8)
-                         :adjustable t :fill-pointer 0)))
-    (loop for ch across string
-          for code = (char-code ch)
-          do (cond
-               ((< code #x80)
-                (vector-push-extend code buf))
-               ((< code #x800)
-                (vector-push-extend (logior #xC0 (ash code -6)) buf)
-                (vector-push-extend (logior #x80 (logand code #x3F)) buf))
-               ((< code #x10000)
-                (vector-push-extend (logior #xE0 (ash code -12)) buf)
-                (vector-push-extend (logior #x80 (logand (ash code -6) #x3F)) buf)
-                (vector-push-extend (logior #x80 (logand code #x3F)) buf))
-               (t
-                (vector-push-extend (logior #xF0 (ash code -18)) buf)
-                (vector-push-extend (logior #x80 (logand (ash code -12) #x3F)) buf)
-                (vector-push-extend (logior #x80 (logand (ash code -6) #x3F)) buf)
-                (vector-push-extend (logior #x80 (logand code #x3F)) buf))))
-    (copy-seq buf)))
+  "Encode STRING to a (vector (unsigned-byte 8)) of UTF-8 octets."
+  (flexi-streams:string-to-octets string :external-format '(:utf-8)))
 
 ;;; ── Encoding resolution tests ─────────────────────────────────────────────
 

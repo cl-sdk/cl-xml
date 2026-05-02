@@ -505,98 +505,17 @@ matching closing tag is consumed."
              (t
               (parse-element-sax stream handler)))))))))
 
-;;; UTF-8 decoding stream — wraps a binary source for character access
-
-(defclass utf-8-decoding-stream (fundamental-character-input-stream)
-  ((%source    :initarg  :source
-               :reader   %source
-               :documentation "The underlying binary (octet) input stream.")
-   (%byte-buf  :initform '()
-               :accessor %byte-buf
-               :documentation "Bytes buffered for the next UTF-8 decode (head = next byte).")
-   (%char-back :initform nil
-               :accessor %char-back
-               :documentation "One character pushed back via UNREAD-CHAR."))
-  (:documentation
-   "Gray character input stream that decodes UTF-8 bytes from a binary source.
-Created by MAKE-UTF-8-DECODING-STREAM.  Supports a one-character pushback
-(required by the XML parser) and an internal byte-level pushback buffer used
-for BOM detection."))
-
-(defun %read-next-byte (s)
-  "Return the next byte from S's byte buffer, or from its source stream.
-Returns NIL at end of stream."
-  (if (%byte-buf s)
-      (let ((b (first (%byte-buf s))))
-        (setf (%byte-buf s) (rest (%byte-buf s)))
-        b)
-      (read-byte (%source s) nil nil)))
-
-(defun %decode-utf-8-char (s)
-  "Decode one UTF-8 character from S.  Returns :EOF at end of stream."
-  (let ((b0 (%read-next-byte s)))
-    (unless b0 (return-from %decode-utf-8-char :eof))
-    (cond
-      ;; Single byte: 0xxxxxxx  (U+0000–U+007F)
-      ((zerop (logand b0 #x80))
-       (code-char b0))
-      ;; Two bytes: 110xxxxx 10xxxxxx  (U+0080–U+07FF)
-      ((= (logand b0 #xE0) #xC0)
-       (let ((b1 (%read-next-byte s)))
-         (unless b1 (error "Truncated UTF-8 two-byte sequence"))
-         (code-char (logior (ash (logand b0 #x1F) 6)
-                            (logand b1 #x3F)))))
-      ;; Three bytes: 1110xxxx 10xxxxxx 10xxxxxx  (U+0800–U+FFFF)
-      ((= (logand b0 #xF0) #xE0)
-       (let* ((b1 (%read-next-byte s))
-              (b2 (%read-next-byte s)))
-         (unless (and b1 b2) (error "Truncated UTF-8 three-byte sequence"))
-         (code-char (logior (ash (logand b0 #x0F) 12)
-                            (ash (logand b1 #x3F) 6)
-                            (logand b2 #x3F)))))
-      ;; Four bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx  (U+10000–U+10FFFF)
-      ((= (logand b0 #xF8) #xF0)
-       (let* ((b1 (%read-next-byte s))
-              (b2 (%read-next-byte s))
-              (b3 (%read-next-byte s)))
-         (unless (and b1 b2 b3) (error "Truncated UTF-8 four-byte sequence"))
-         (code-char (logior (ash (logand b0 #x07) 18)
-                            (ash (logand b1 #x3F) 12)
-                            (ash (logand b2 #x3F) 6)
-                            (logand b3 #x3F)))))
-      (t
-       (error "Invalid UTF-8 leading byte: #x~X" b0)))))
-
-(defmethod stream-read-char ((s utf-8-decoding-stream))
-  (let ((back (%char-back s)))
-    (if back
-        (progn (setf (%char-back s) nil) back)
-        (%decode-utf-8-char s))))
-
-(defmethod stream-unread-char ((s utf-8-decoding-stream) ch)
-  (setf (%char-back s) ch)
-  nil)
-
-(defmethod stream-peek-char ((s utf-8-decoding-stream))
-  (let ((ch (stream-read-char s)))
-    (unless (eq ch :eof)
-      (setf (%char-back s) ch))
-    ch))
+;;; UTF-8 decoding stream — wraps a binary source for character access via flexi-streams
 
 (defun make-utf-8-decoding-stream (binary-stream)
-  "Wrap BINARY-STREAM (an octet input stream) in a UTF-8 decoding Gray stream.
-If the stream begins with the UTF-8 BOM (0xEF 0xBB 0xBF), the BOM is consumed
-and discarded.  Returns the new UTF-8-DECODING-STREAM."
-  (let* ((s  (make-instance 'utf-8-decoding-stream :source binary-stream))
-         (b0 (read-byte binary-stream nil nil))
-         (b1 (when b0 (read-byte binary-stream nil nil)))
-         (b2 (when b1 (read-byte binary-stream nil nil))))
-    (if (and b0 (= b0 #xEF) b1 (= b1 #xBB) b2 (= b2 #xBF))
-        s                                    ; BOM consumed — stream is ready
-        ;; Not a BOM: push any bytes we peeked back into the byte buffer.
-        (progn
-          (setf (%byte-buf s) (remove nil (list b0 b1 b2)))
-          s))))
+  "Wrap BINARY-STREAM (an octet input stream) in a flexi-streams UTF-8 character
+input stream.  A leading UTF-8 BOM (U+FEFF), if present, is consumed and
+discarded.  Returns the flexi-streams character stream."
+  (let* ((ef (flexi-streams:make-external-format :utf-8 :eol-style :lf))
+         (cs (flexi-streams:make-flexi-stream binary-stream :external-format ef)))
+    (when (eql (peek-char nil cs nil nil) (code-char #xFEFF))
+      (read-char cs))
+    cs))
 
 ;;; Encoding resolution — XML 1.0 §4.3.3
 
