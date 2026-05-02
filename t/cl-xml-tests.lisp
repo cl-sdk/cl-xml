@@ -329,3 +329,56 @@
     (let ((root (cl-xml:xml-document-root doc)))
       (is (string= "root" (cl-xml:xml-node-tag root)))
       (is (= 1 (length (cl-xml:xml-node-children root)))))))
+
+;;; ── Encoding resolution (BOM stripping, §4.3.3 / Appendix F) ────────────
+
+(test bom-stripped
+  "A leading UTF-8 BOM (U+FEFF) is silently stripped before parsing."
+  (let* ((xml (concatenate 'string (string #\uFEFF) "<root />"))
+         (doc (cl-xml:parse-xml xml)))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test bom-stripped-with-xml-declaration
+  "A BOM followed by an XML declaration is handled correctly."
+  (let* ((xml (concatenate 'string
+                (string #\uFEFF)
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root />"))
+         (doc (cl-xml:parse-xml xml)))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test encoding-utf8-accepted
+  "An XML declaration with encoding=\"UTF-8\" is accepted."
+  (let ((doc (cl-xml:parse-xml "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test encoding-utf8-case-insensitive
+  "The encoding attribute is matched case-insensitively (e.g. utf-8, Utf-8)."
+  (let ((doc1 (cl-xml:parse-xml "<?xml version=\"1.0\" encoding=\"utf-8\"?><root />"))
+        (doc2 (cl-xml:parse-xml "<?xml version=\"1.0\" encoding=\"Utf-8\"?><root />")))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc1))))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc2))))))
+
+(test encoding-absent-accepted
+  "An XML declaration without an encoding attribute uses the default (UTF-8)."
+  (let ((doc (cl-xml:parse-xml "<?xml version=\"1.0\"?><root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test no-xml-declaration-accepted
+  "A document without any XML declaration is accepted under the default encoding."
+  (let ((doc (cl-xml:parse-xml "<root />")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test unsupported-encoding-error
+  "An XML declaration with an unsupported encoding signals an error."
+  (signals error
+    (cl-xml:parse-xml "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><root />")))
+
+(test unsupported-encoding-utf16-error
+  "UTF-16 declared via the encoding attribute signals an error."
+  (signals error
+    (cl-xml:parse-xml "<?xml version=\"1.0\" encoding=\"UTF-16\"?><root />")))

@@ -68,6 +68,14 @@ ROOT is the root xml-node."
   "True if CH is an XML 1.0 whitespace character (S production)."
   (member ch '(#\Space #\Tab #\Newline #\Return)))
 
+;;; BOM stripping — XML 1.0 Appendix F
+
+(defun strip-bom (str)
+  "Strip a leading Unicode BOM (U+FEFF) from STR if present, per XML Appendix F."
+  (if (and (> (length str) 0) (char= (char str 0) #\uFEFF))
+      (subseq str 1)
+      str))
+
 ;;; Low-level cursor helpers
 
 (defun skip-whitespace (str pos)
@@ -411,6 +419,29 @@ of the root element."
           (t (return)))))
     (values (nreverse nodes) pos)))
 
+;;; Encoding resolution — XML 1.0 §4.3.3, Appendix F
+
+(defun parse-xml-declaration-attrs (data)
+  "Parse the pseudo-attributes from an XML declaration PI data string DATA.
+Appends a '/>\\' sentinel so that parse-attributes sees a valid terminator.
+Returns an alist of (name . value) pairs."
+  (car (parse-attributes (concatenate 'string data "/>") 0)))
+
+(defun resolve-encoding (prolog)
+  "Inspect the XML declaration in PROLOG (if any) and validate the declared
+encoding.  UTF-8 (case-insensitive) and the absence of any encoding declaration
+are both accepted as the default.  Any other declared encoding signals an error."
+  (let* ((decl (find-if (lambda (node)
+                          (and (xml-pi-p node)
+                               (string= "xml" (xml-pi-target node))))
+                        prolog))
+         (encoding (when decl
+                     (cdr (assoc "encoding"
+                                 (parse-xml-declaration-attrs (xml-pi-data decl))
+                                 :test #'string=)))))
+    (when (and encoding (not (string-equal encoding "UTF-8")))
+      (error "Unsupported encoding '~a': only UTF-8 is supported" encoding))))
+
 ;;; Public API
 
 (defun parse-xml (str)
@@ -422,8 +453,10 @@ Inside elements, comments become xml-comment nodes, processing instructions
 become xml-pi nodes, CDATA sections become xml-cdata nodes, and character
 data is returned as strings.
 Entity references (&amp; &lt; &gt; &quot; &apos; &#N; &#xN;) are expanded."
-  (multiple-value-bind (prolog-nodes pos) (parse-prolog str 0)
-    (unless (and (< pos (length str)) (char= (char str pos) #\<))
-      (error "Expected root element at position ~a" pos))
-    (let ((result (parse-element str (1+ pos))))
-      (make-xml-document :prolog prolog-nodes :root (car result)))))
+  (let ((str (strip-bom str)))
+    (multiple-value-bind (prolog-nodes pos) (parse-prolog str 0)
+      (resolve-encoding prolog-nodes)
+      (unless (and (< pos (length str)) (char= (char str pos) #\<))
+        (error "Expected root element at position ~a" pos))
+      (let ((result (parse-element str (1+ pos))))
+        (make-xml-document :prolog prolog-nodes :root (car result))))))
