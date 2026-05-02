@@ -70,7 +70,6 @@ methods are no-ops.
 | `(comment handler data)` | `<!-- … -->` comment |
 | `(processing-instruction handler target data)` | `<?target data?>` PI |
 | `(cdata-section handler data)` | `<![CDATA[…]]>` section |
-```
 
 ### xml-document
 
