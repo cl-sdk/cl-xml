@@ -148,11 +148,52 @@ Whitespace-only character data between elements is discarded.
 
 - **§2.3 Names** — `NameStartChar` / `NameChar` Unicode ranges enforced
 - **§2.3 / §3.3.3 Attribute values** — bare `<` is an error; entity/character references expanded
+- **§2.4 CharData** — the sequence `]]>` in character data is a well-formedness error
 - **§2.5 Comments** — `--` inside a comment body is an error
+- **§2.6 Processing instructions** — PI targets matching `[xX][mM][lL]` are reserved and rejected
 - **§2.7 CDATA sections** — content is literal (markup characters not interpreted)
-- **§2.8 Prolog** — XML declaration and DOCTYPE handled; prolog comments/PIs preserved
+- **§2.8 Prolog / Epilog** — XML declaration and DOCTYPE handled; content after the root element (other than whitespace, comments, and PIs) is rejected
 - **§3.1 Attributes** — duplicate attribute names are an error
+- **§4.1 Character references** — code points outside the XML 1.0 Char production are rejected
 - **§4.6 References** — `&amp;` `&lt;` `&gt;` `&quot;` `&apos;` `&#N;` `&#xN;` expanded
+- **§2.11 End-of-line handling** — CR, CR+LF normalized to LF (string input)
+
+### W3C XML Conformance Test Suite
+
+To run the W3C XML Conformance Test Suites
+([xmlts20130923.zip](https://www.w3.org/XML/Test/xmlts20130923.zip)):
+
+```sh
+# Download, extract, and run (requires network access to www.w3.org):
+./run-conformance-tests.sh
+
+# Or point to an already-extracted tree:
+XMLTS_DIR=/path/to/xmlconf ./run-conformance-tests.sh
+```
+
+The conformance runner is also available as a standalone ASDF system:
+
+```lisp
+(asdf:load-system :cl-xml.conformance)
+
+;; Run and print a report
+(cl-xml.conformance:run-conformance-tests)
+
+;; Point to a specific xmlconf/ directory
+(cl-xml.conformance:run-conformance-tests
+  :dir #p"/path/to/xmlconf/")
+```
+
+**Known limitations** (tests that may not pass):
+
+- *External entities / DTD processing* — cl-xml does not resolve external
+  entities or process DTD declarations, so `TYPE="valid"` tests with
+  `ENTITIES` other than `"none"` are skipped.
+- *Character encoding* — only UTF-8 and ASCII input is fully supported;
+  test files in other encodings are attempted as UTF-8.
+- *XML declaration placement* — the XML declaration is parsed as a
+  processing instruction; a misplaced `<?xml...?>` later in the prolog
+  will be accepted rather than rejected.
 
 ## License
 

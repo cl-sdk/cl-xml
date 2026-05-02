@@ -103,6 +103,15 @@ Returns the name as a string."
 
 ;;; Entity and character reference expansion — XML 1.0 §4.1, §4.6
 
+(defun valid-xml-char-p (code)
+  "True if CODE is a valid XML 1.0 Char code point (XML 1.0 §2.2)."
+  (or (= code #x9)
+      (= code #xA)
+      (= code #xD)
+      (and (>= code #x20)    (<= code #xD7FF))
+      (and (>= code #xE000)  (<= code #xFFFD))
+      (and (>= code #x10000) (<= code #x10FFFF))))
+
 (defun expand-char-ref (stream)
   "Expand a character reference starting just after '&#'.
 Returns the expanded string."
@@ -117,7 +126,11 @@ Returns the expanded string."
       (unless (eql (peek-char nil stream nil nil) #\;)
         (error "Unterminated character reference"))
       (read-char stream)                ; consume ';'
-      (string (code-char (parse-integer (copy-seq buf) :radix (if hex-p 16 10)))))))
+      (let ((code (parse-integer (copy-seq buf) :radix (if hex-p 16 10))))
+        (unless (valid-xml-char-p code)
+          (error "Invalid XML character reference &#~a~a; (code #x~X)"
+                 (if hex-p "x" "") (copy-seq buf) code))
+        (string (code-char code))))))
 
 (defun expand-entity-ref (stream)
   "Parse and expand a predefined entity or character reference starting just
@@ -222,6 +235,14 @@ Returns an xml-comment node."
 
 ;;; Processing instruction parsing — XML 1.0 §2.6
 
+(defun xml-reserved-pi-target-p (target)
+  "True if TARGET matches the reserved pattern [xX][mM][lL] (XML 1.0 §2.6).
+Such targets are reserved and must not be used for regular processing instructions."
+  (and (= (length target) 3)
+       (member (char target 0) '(#\x #\X))
+       (member (char target 1) '(#\m #\M))
+       (member (char target 2) '(#\l #\L))))
+
 (defun parse-pi (stream)
   "Parse a processing instruction body and closing '?>'.
 STREAM must be just past the opening '<?'.
@@ -262,19 +283,28 @@ Handles a nested internal subset enclosed in '[' … ']'."
 
 (defun parse-content-text (stream)
   "Parse character data and entity/character references from STREAM up to
-the next '<'.  Returns the text string."
+the next '<'.  Returns the text string.
+Signals an error if the forbidden sequence ']]>' is encountered (XML 1.0 §2.4)."
   (let ((buf (make-array 0 :element-type 'character
-                           :adjustable t :fill-pointer 0)))
+                           :adjustable t :fill-pointer 0))
+        (close-brackets 0))
     (loop
       (let ((ch (peek-char nil stream nil nil)))
         (when (or (null ch) (char= ch #\<))
           (return)))
       (let ((ch (read-char stream)))
         (cond
+          ((char= ch #\])
+           (incf close-brackets)
+           (vector-push-extend ch buf))
+          ((and (char= ch #\>) (>= close-brackets 2))
+           (error "The sequence ']]>' is not allowed in character data (XML 1.0 §2.4)"))
           ((char= ch #\&)
+           (setf close-brackets 0)
            (let ((expansion (expand-entity-ref stream)))
              (loop for c across expansion do (vector-push-extend c buf))))
           (t
+           (setf close-brackets 0)
            (vector-push-extend ch buf)))))
     (copy-seq buf)))
 
@@ -509,6 +539,9 @@ matching closing tag is consumed."
              ((char= next #\?)
               (read-char stream)        ; consume '?'
               (let ((pi-node (parse-pi stream)))
+                (when (xml-reserved-pi-target-p (xml-pi-target pi-node))
+                  (error "PI target '~a' is reserved (XML 1.0 §2.6)"
+                         (xml-pi-target pi-node)))
                 (processing-instruction handler
                                         (xml-pi-target pi-node)
                                         (xml-pi-data pi-node))))
@@ -562,7 +595,50 @@ skipped.  Leaves STREAM positioned at the '<' of the root element."
          (unread-char #\< stream)
          (return))))))
 
-;;; Namespace resolution — Namespaces in XML 1.0
+;;; Document epilog parsing — XML 1.0 §2.8
+
+(defun parse-epilog-sax (stream handler)
+  "Parse the document epilog (content after the root element), firing SAX
+events for comments and processing instructions on HANDLER.
+Only whitespace, comments, and processing instructions are allowed.
+Signals an error if any other content is present (XML 1.0 §2.8)."
+  (loop
+    (skip-whitespace stream)
+    (let ((ch (peek-char nil stream nil nil)))
+      (unless ch (return))              ; EOF: normal end of document
+      (unless (char= ch #\<)
+        (error "Unexpected content after the root element"))
+      (read-char stream)                ; consume '<'
+      (let ((next (peek-char nil stream nil nil)))
+        (cond
+          ;; Comment or unexpected <!...: <!
+          ((eql next #\!)
+           (read-char stream)           ; consume '!'
+           (let ((after-bang (peek-char nil stream nil nil)))
+             (cond
+               ;; Comment: <!--
+               ((eql after-bang #\-)
+                (read-char stream)      ; consume first '-'
+                (unless (eql (peek-char nil stream nil nil) #\-)
+                  (error "Expected '--' after '<!' in epilog"))
+                (read-char stream)      ; consume second '-'
+                (comment handler (xml-comment-data (parse-comment stream))))
+               (t
+                (error "Unexpected '<!' content in document epilog")))))
+          ;; Processing instruction: <?
+          ((eql next #\?)
+           (read-char stream)           ; consume '?'
+           (let ((pi-node (parse-pi stream)))
+             (when (xml-reserved-pi-target-p (xml-pi-target pi-node))
+               (error "PI target '~a' is reserved (XML 1.0 §2.6)"
+                      (xml-pi-target pi-node)))
+             (processing-instruction handler
+                                     (xml-pi-target pi-node)
+                                     (xml-pi-data pi-node))))
+          ;; Anything else (element start, text, etc.) is an error
+          (t
+           (error "Unexpected content after the root element")))))))
+
 
 (defparameter +xml-namespace-uri+
   "http://www.w3.org/XML/1998/namespace"
@@ -693,6 +769,30 @@ An xmlns=\"\" declaration resets the default namespace to NIL (no namespace)."
 
 ;;; Public API
 
+(defun normalize-xml-eol (string)
+  "Normalize line endings in STRING per XML 1.0 §2.11.
+Translates CR LF and bare CR to a single LF character."
+  (let ((len (length string)))
+    ;; Fast path: if no CR exists in the string, return it unchanged.
+    (unless (find #\Return string)
+      (return-from normalize-xml-eol string))
+    (let ((result (make-array len :element-type 'character
+                                  :adjustable t :fill-pointer 0)))
+      (let ((i 0))
+        (loop while (< i len) do
+          (let ((ch (char string i)))
+            (cond
+              ((char= ch #\Return)
+               (vector-push-extend #\Newline result)
+               (incf i)
+               ;; Skip the following LF if present (CRLF → LF)
+               (when (and (< i len) (char= (char string i) #\Newline))
+                 (incf i)))
+              (t
+               (vector-push-extend ch result)
+               (incf i))))))
+      (copy-seq result))))
+
 (defun parse-xml (input &key (handler (make-instance 'dom-builder)))
   "Parse INPUT (a string, standard character stream, or trivial-gray-streams
 character stream) as an XML document using a SAX-style event handler.
@@ -708,9 +808,11 @@ The return value of END-DOCUMENT on the handler becomes the return value of
 PARSE-XML.
 
 Entity references (&amp; &lt; &gt; &quot; &apos; &#N; &#xN;) are expanded
-before CHARACTERS and attribute values are reported."
+before CHARACTERS and attribute values are reported.
+
+String input has its line endings normalized per XML 1.0 §2.11 before parsing."
   (let ((stream (etypecase input
-                  (string (make-string-input-stream input))
+                  (string (make-string-input-stream (normalize-xml-eol input)))
                   (fundamental-character-input-stream input)
                   (stream input))))
     (start-document handler)
@@ -719,4 +821,5 @@ before CHARACTERS and attribute values are reported."
       (error "Expected root element"))
     (read-char stream)                  ; consume '<'
     (parse-element-sax stream handler)
+    (parse-epilog-sax stream handler)
     (end-document handler)))

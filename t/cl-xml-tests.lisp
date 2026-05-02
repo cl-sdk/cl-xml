@@ -662,3 +662,109 @@
     (is (= 1 (length children)))
     (is (string= "hello" (first children)))))
 
+;;; ── XML 1.0 conformance fixes ────────────────────────────────────────────
+
+;;; ── §2.4 CharData: ']]>' forbidden ──────────────────────────────────────
+
+(test cdata-close-in-content-error
+  "The sequence ']]>' in character data is a well-formedness error."
+  (signals error (cl-xml:parse-xml "<el>]]></el>")))
+
+(test cdata-close-partial-ok
+  "A single ']' in content is valid character data."
+  (let* ((root (parse-root "<el>]</el>"))
+         (children (cl-xml:xml-node-children root)))
+    (is (string= "]" (first children)))))
+
+(test cdata-close-double-bracket-ok
+  "Two consecutive ']' not followed by '>' are valid character data."
+  (let* ((root (parse-root "<el>]]</el>"))
+         (children (cl-xml:xml-node-children root)))
+    (is (string= "]]" (first children)))))
+
+;;; ── §4.1 Character references: range validation ─────────────────────────
+
+(test char-ref-null-error
+  "&#0; is not a valid XML character reference."
+  (signals error (cl-xml:parse-xml "<el v=\"&#0;\"/>")))
+
+(test char-ref-surrogate-error
+  "&#xD800; (surrogate pair range) is not a valid XML character reference."
+  (signals error (cl-xml:parse-xml "<el v=\"&#xD800;\"/>")))
+
+(test char-ref-fffe-error
+  "&#xFFFE; is not a valid XML character reference."
+  (signals error (cl-xml:parse-xml "<el v=\"&#xFFFE;\"/>")))
+
+(test char-ref-valid-boundary
+  "&#x20; (space) and &#xD7FF; are valid XML character references."
+  (let ((node (parse-root "<el v=\"&#x20;\" w=\"&#xD7FF;\"/>")))
+    (is (string= " " (cdr (assoc "v" (cl-xml:xml-node-attributes node)
+                                 :test #'string=))))))
+
+;;; ── §2.8 Epilog: no extra content after root ─────────────────────────────
+
+(test content-after-root-error
+  "Extra element content after the root element is a well-formedness error."
+  (signals error (cl-xml:parse-xml "<root/><extra/>")))
+
+(test text-after-root-error
+  "Non-whitespace text after the root element is a well-formedness error."
+  (signals error (cl-xml:parse-xml "<root/>oops")))
+
+(test whitespace-after-root-ok
+  "Whitespace after the root element is allowed."
+  (let ((doc (cl-xml:parse-xml "<root/>  ")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test comment-after-root-ok
+  "A comment after the root element is allowed in the epilog."
+  (let ((doc (cl-xml:parse-xml "<root/><!-- epilog -->")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+(test pi-after-root-ok
+  "A processing instruction after the root element is allowed in the epilog."
+  (let ((doc (cl-xml:parse-xml "<root/><?app data?>")))
+    (is (cl-xml:xml-document-p doc))
+    (is (string= "root" (cl-xml:xml-node-tag (cl-xml:xml-document-root doc))))))
+
+;;; ── §2.6 PI target 'xml' reservation ────────────────────────────────────
+
+(test pi-target-xml-lowercase-error
+  "A PI target matching 'xml' (lowercase) inside an element is reserved."
+  (signals error (cl-xml:parse-xml "<el><?xml?></el>")))
+
+(test pi-target-xml-uppercase-error
+  "A PI target matching 'XML' (uppercase) inside an element is reserved."
+  (signals error (cl-xml:parse-xml "<el><?XML?></el>")))
+
+(test pi-target-xml-mixedcase-error
+  "A PI target matching 'Xml' (mixed case) inside an element is reserved."
+  (signals error (cl-xml:parse-xml "<el><?Xml?></el>")))
+
+(test pi-target-xml-in-epilog-error
+  "A PI target matching 'XML' in the document epilog is reserved."
+  (signals error (cl-xml:parse-xml "<el/><?XML?>")))
+
+(test xml-declaration-still-accepted
+  "The XML declaration '<?xml ...?>' in the prolog is still accepted."
+  (let ((doc (cl-xml:parse-xml "<?xml version=\"1.0\"?><root/>")))
+    (is (cl-xml:xml-document-p doc))))
+
+;;; ── §2.11 EOL normalization ──────────────────────────────────────────────
+
+(test eol-crlf-normalized
+  "CRLF in string input is normalized to LF before parsing."
+  (let* ((root (parse-root (format nil "<p>line1~Cline2</p>" #\Return)))
+         (children (cl-xml:xml-node-children root)))
+    (is (string= (format nil "line1~%line2") (first children)))))
+
+(test eol-bare-cr-normalized
+  "A bare CR (not followed by LF) in string input is normalized to LF."
+  (let* ((input (format nil "<p>a~Cb</p>" #\Return))
+         (root  (parse-root input))
+         (children (cl-xml:xml-node-children root)))
+    (is (string= (format nil "a~%b") (first children)))))
+

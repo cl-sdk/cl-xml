@@ -1,0 +1,59 @@
+name: W3C XML Conformance Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Run weekly on Sundays at 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: W3C XML 1.0 Conformance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install SBCL and dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            sbcl \
+            cl-fiveam \
+            cl-trivial-gray-streams \
+            cl-alexandria \
+            cl-trivial-backtrace
+
+      - name: Download W3C XML Conformance Test Suite
+        run: |
+          curl -fsSL -o /tmp/xmlts20130923.zip \
+            https://www.w3.org/XML/Test/xmlts20130923.zip
+          unzip -q /tmp/xmlts20130923.zip -d /tmp/xmlts
+          echo "XMLTS_DIR=/tmp/xmlts/xmlconf/" >> "$GITHUB_ENV"
+
+      - name: Run W3C conformance tests
+        run: |
+          sbcl --non-interactive \
+            --eval '(require :asdf)' \
+            --eval "(push #p\"/usr/share/common-lisp/source/fiveam/\" asdf:*central-registry*)" \
+            --eval "(push #p\"/usr/share/common-lisp/source/cl-trivial-gray-streams/\" asdf:*central-registry*)" \
+            --eval "(push #p\"/usr/share/common-lisp/source/alexandria/\" asdf:*central-registry*)" \
+            --eval "(push #p\"/usr/share/common-lisp/source/trivial-backtrace/\" asdf:*central-registry*)" \
+            --eval "(push #p\"$(pwd)/\" asdf:*central-registry*)" \
+            --eval '(asdf:load-system :cl-xml.conformance)' \
+            --eval '(let ((results (cl-xml.conformance:run-conformance-tests :verbose nil)))
+                      (when results
+                        (let ((failed (cl-xml.conformance:conformance-results-failed results))
+                              (total  (cl-xml.conformance:conformance-results-total  results)))
+                          (format t "~%Exit status: ~a/~a failed~%" failed total)
+                          ;; Allow up to 5% failure rate to account for known parser
+                          ;; limitations (no external entity resolution, no DTD processing).
+                          (when (> failed (* 0.05 total))
+                            (uiop:quit 1)))))'
