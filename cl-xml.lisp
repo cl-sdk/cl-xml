@@ -68,58 +68,58 @@ ROOT is the root xml-node."
   "True if CH is an XML 1.0 whitespace character (S production)."
   (member ch '(#\Space #\Tab #\Newline #\Return)))
 
-;;; Low-level cursor helpers
+;;; Low-level stream helpers
 
-(defun skip-whitespace (str pos)
-  "Advance POS past XML whitespace characters in STR."
-  (loop while (and (< pos (length str))
-                   (xml-whitespace-p (char str pos)))
-        do (incf pos))
-  pos)
+(defun skip-whitespace (stream)
+  "Advance past XML whitespace characters in STREAM."
+  (loop while (let ((ch (peek-char nil stream nil nil)))
+                (and ch (xml-whitespace-p ch)))
+        do (read-char stream)))
 
-(defun parse-name (str pos)
-  "Parse an XML Name (tag or attribute name) starting at POS.
+(defun parse-name (stream)
+  "Parse an XML Name (tag or attribute name).
 Validates NameStartChar for the first character and NameChar for the rest.
-Returns a cons (name . new-pos)."
-  (when (or (>= pos (length str))
-            (not (name-start-char-p (char str pos))))
-    (error "Invalid XML name start character at position ~a" pos))
-  (let ((start pos))
-    (incf pos)
-    (loop while (and (< pos (length str))
-                     (name-char-p (char str pos)))
-          do (incf pos))
-    (cons (subseq str start pos) pos)))
+Returns the name as a string."
+  (let ((first-ch (peek-char nil stream nil nil)))
+    (unless (and first-ch (name-start-char-p first-ch))
+      (error "Invalid XML name start character"))
+    (let ((buf (make-array 8 :element-type 'character :adjustable t :fill-pointer 0)))
+      (vector-push-extend (read-char stream) buf)
+      (loop while (let ((ch (peek-char nil stream nil nil)))
+                    (and ch (name-char-p ch)))
+            do (vector-push-extend (read-char stream) buf))
+      (copy-seq buf))))
 
 ;;; Entity and character reference expansion — XML 1.0 §4.1, §4.6
 
-(defun expand-char-ref (str pos)
-  "Expand a character reference starting just after '&#' at POS.
-Returns a cons (string . new-pos)."
-  (let ((hex-p (and (< pos (length str)) (char= (char str pos) #\x))))
-    (when hex-p (incf pos))
-    (let ((start pos))
-      (loop while (and (< pos (length str))
-                       (digit-char-p (char str pos) (if hex-p 16 10)))
-            do (incf pos))
-      (when (= start pos)
-        (error "Empty character reference at position ~a" pos))
-      (unless (and (< pos (length str)) (char= (char str pos) #\;))
-        (error "Unterminated character reference at position ~a" pos))
-      (let* ((num-str (subseq str start pos))
-             (code    (parse-integer num-str :radix (if hex-p 16 10))))
-        (cons (string (code-char code)) (1+ pos))))))
+(defun expand-char-ref (stream)
+  "Expand a character reference starting just after '&#'.
+Returns the expanded string."
+  (let ((hex-p (eql (peek-char nil stream nil nil) #\x)))
+    (when hex-p (read-char stream))
+    (let ((buf (make-array 4 :element-type 'character :adjustable t :fill-pointer 0)))
+      (loop while (let ((ch (peek-char nil stream nil nil)))
+                    (and ch (digit-char-p ch (if hex-p 16 10))))
+            do (vector-push-extend (read-char stream) buf))
+      (when (zerop (fill-pointer buf))
+        (error "Empty character reference"))
+      (unless (eql (peek-char nil stream nil nil) #\;)
+        (error "Unterminated character reference"))
+      (read-char stream)                ; consume ';'
+      (string (code-char (parse-integer (copy-seq buf) :radix (if hex-p 16 10)))))))
 
-(defun expand-entity-ref (str pos)
+(defun expand-entity-ref (stream)
   "Parse and expand a predefined entity or character reference starting just
-after '&' at POS.  Supports &amp; &lt; &gt; &quot; &apos; and &#N; / &#xN;.
-Returns a cons (string . new-pos)."
-  (if (and (< pos (length str)) (char= (char str pos) #\#))
-      (expand-char-ref str (1+ pos))
-      (destructuring-bind (name . after-name) (parse-name str pos)
-        (unless (and (< after-name (length str))
-                     (char= (char str after-name) #\;))
-          (error "Unterminated entity reference '&~a' at position ~a" name pos))
+after '&'.  Supports &amp; &lt; &gt; &quot; &apos; and &#N; / &#xN;.
+Returns the expanded string."
+  (if (eql (peek-char nil stream nil nil) #\#)
+      (progn
+        (read-char stream)              ; consume '#'
+        (expand-char-ref stream))
+      (let ((name (parse-name stream)))
+        (unless (eql (peek-char nil stream nil nil) #\;)
+          (error "Unterminated entity reference '&~a'" name))
+        (read-char stream)              ; consume ';'
         (let ((expansion (cdr (assoc name
                                      '(("amp"  . "&")
                                        ("lt"   . "<")
@@ -129,145 +129,173 @@ Returns a cons (string . new-pos)."
                                      :test #'string=))))
           (unless expansion
             (error "Unknown entity reference '&~a;'" name))
-          (cons expansion (1+ after-name))))))
+          expansion))))
 
 ;;; Attribute value parsing — XML 1.0 §2.3, §3.3.3
 
-(defun parse-attribute-value (str pos)
-  "Parse a single- or double-quoted attribute value starting at POS,
+(defun parse-attribute-value (stream)
+  "Parse a single- or double-quoted attribute value from STREAM,
 expanding entity and character references and forbidding bare '<'.
-Returns a cons (value . new-pos)."
-  (let ((quote (char str pos)))
+Returns the value string."
+  (let ((quote (read-char stream nil nil)))
     (unless (member quote '(#\" #\'))
-      (error "Expected a quote character at position ~a" pos))
-    (incf pos)
+      (error "Expected a quote character"))
     (let ((buf (make-array 0 :element-type 'character
                              :adjustable t :fill-pointer 0)))
       (loop
-        (when (>= pos (length str))
-          (error "Unterminated attribute value"))
-        (let ((ch (char str pos)))
+        (let ((ch (peek-char nil stream nil nil)))
+          (unless ch (error "Unterminated attribute value"))
           (cond
             ((char= ch quote)
-             (incf pos)
+             (read-char stream)
              (return))
             ((char= ch #\<)
-             (error "Illegal '<' in attribute value at position ~a" pos))
+             (error "Illegal '<' in attribute value"))
             ((char= ch #\&)
-             (destructuring-bind (expansion . new-pos)
-                 (expand-entity-ref str (1+ pos))
-               (loop for c across expansion do (vector-push-extend c buf))
-               (setf pos new-pos)))
+             (read-char stream)         ; consume '&'
+             (let ((expansion (expand-entity-ref stream)))
+               (loop for c across expansion do (vector-push-extend c buf))))
             (t
-             (vector-push-extend ch buf)
-             (incf pos)))))
-      (cons (copy-seq buf) pos))))
+             (vector-push-extend (read-char stream) buf)))))
+      (copy-seq buf))))
 
 ;;; Attribute list parsing — XML 1.0 §3.1
 
-(defun parse-attributes (str pos)
-  "Parse zero or more attributes starting at POS, stopping at '>' or '/>'.
+(defun parse-attributes (stream)
+  "Parse zero or more attributes from STREAM, stopping at '>' or '/>'.
 Detects duplicate attribute names.
-Returns a cons (attributes . new-pos) where attributes is an alist of
-\(name . value) pairs."
+Returns an alist of (name . value) pairs."
   (let ((attributes '()))
     (loop
-      (setf pos (skip-whitespace str pos))
-      (when (or (>= pos (length str))
-                (member (char str pos) '(#\> #\/)))
-        (return))
-      (destructuring-bind (name . after-name) (parse-name str pos)
+      (skip-whitespace stream)
+      (let ((ch (peek-char nil stream nil nil)))
+        (when (or (null ch) (member ch '(#\> #\/)))
+          (return)))
+      (let ((name (parse-name stream)))
         (when (assoc name attributes :test #'string=)
           (error "Duplicate attribute '~a'" name))
-        (setf pos (skip-whitespace str after-name))
-        (unless (and (< pos (length str)) (char= (char str pos) #\=))
-          (error "Expected '=' after attribute name '~a' at position ~a" name pos))
-        (setf pos (skip-whitespace str (1+ pos)))
-        (destructuring-bind (value . after-value) (parse-attribute-value str pos)
-          (push (cons name value) attributes)
-          (setf pos after-value))))
-    (cons (nreverse attributes) pos)))
+        (skip-whitespace stream)
+        (unless (eql (peek-char nil stream nil nil) #\=)
+          (error "Expected '=' after attribute name '~a'" name))
+        (read-char stream)              ; consume '='
+        (skip-whitespace stream)
+        (let ((value (parse-attribute-value stream)))
+          (push (cons name value) attributes))))
+    (nreverse attributes)))
 
 ;;; Comment parsing — XML 1.0 §2.5
 
-(defun parse-comment (str pos)
-  "Parse a comment body and closing '-->'.  POS must be just past '<!--'.
-Returns a cons (xml-comment-node . new-pos)."
-  (let ((start pos))
-    (loop
-      (when (>= pos (length str))
-        (error "Unterminated comment"))
-      (when (and (<= (+ pos 3) (length str))
-                 (string= str "-->" :start1 pos :end1 (+ pos 3)))
-        (return (cons (make-xml-comment :data (subseq str start pos))
-                      (+ pos 3))))
-      ;; '--' must not appear inside a comment except as part of -->
-      (when (and (< (1+ pos) (length str))
-                 (char= (char str pos) #\-)
-                 (char= (char str (1+ pos)) #\-))
-        (error "Illegal '--' inside comment at position ~a" pos))
-      (incf pos))))
-
-;;; Processing instruction parsing — XML 1.0 §2.6
-
-(defun parse-pi (str pos)
-  "Parse a processing instruction body and closing '?>'.
-POS must be just past the opening '<?'.
-Returns a cons (xml-pi-node . new-pos)."
-  (destructuring-bind (target . after-target) (parse-name str pos)
-    (let* ((pos (skip-whitespace str after-target))
-           (data-start pos))
-      (loop
-        (when (>= pos (length str))
-          (error "Unterminated processing instruction"))
-        (when (and (< (1+ pos) (length str))
-                   (char= (char str pos) #\?)
-                   (char= (char str (1+ pos)) #\>))
-          (return (cons (make-xml-pi :target target
-                                     :data (subseq str data-start pos))
-                        (+ pos 2))))
-        (incf pos)))))
-
-;;; DOCTYPE skipping — XML 1.0 §2.8
-
-(defun skip-doctype (str pos)
-  "Skip a DOCTYPE declaration.  POS must be just past '<!DOCTYPE'.
-Handles a nested internal subset enclosed in '[' … ']'.
-Returns new-pos after the closing '>'."
-  (let ((depth 0))
-    (loop
-      (when (>= pos (length str))
-        (error "Unterminated DOCTYPE declaration"))
-      (let ((ch (char str pos)))
-        (cond
-          ((char= ch #\[) (incf depth) (incf pos))
-          ((char= ch #\]) (decf depth) (incf pos))
-          ((and (= depth 0) (char= ch #\>))
-           (return (1+ pos)))
-          (t (incf pos)))))))
-
-;;; Character data parsing — XML 1.0 §2.4
-
-(defun parse-content-text (str pos)
-  "Parse character data and entity/character references up to the next '<'.
-Returns a cons (string . new-pos)."
+(defun parse-comment (stream)
+  "Parse a comment body and closing '-->'.  STREAM must be just past '<!--'.
+Returns an xml-comment node."
   (let ((buf (make-array 0 :element-type 'character
                            :adjustable t :fill-pointer 0)))
     (loop
-      (when (or (>= pos (length str))
-                (char= (char str pos) #\<))
-        (return))
-      (let ((ch (char str pos)))
+      (let ((ch (read-char stream nil nil)))
+        (unless ch (error "Unterminated comment"))
+        (cond
+          ((char= ch #\-)
+           (let ((ch2 (peek-char nil stream nil nil)))
+             (if (eql ch2 #\-)
+                 (progn
+                   (read-char stream)   ; consume second '-'
+                   (let ((ch3 (peek-char nil stream nil nil)))
+                     (if (eql ch3 #\>)
+                         (progn
+                           (read-char stream) ; consume '>'
+                           (return (make-xml-comment :data (copy-seq buf))))
+                         (error "Illegal '--' inside comment"))))
+                 (vector-push-extend ch buf))))
+          (t
+           (vector-push-extend ch buf)))))))
+
+;;; Processing instruction parsing — XML 1.0 §2.6
+
+(defun parse-pi (stream)
+  "Parse a processing instruction body and closing '?>'.
+STREAM must be just past the opening '<?'.
+Returns an xml-pi node."
+  (let ((target (parse-name stream)))
+    (skip-whitespace stream)
+    (let ((buf (make-array 0 :element-type 'character
+                             :adjustable t :fill-pointer 0)))
+      (loop
+        (let ((ch (read-char stream nil nil)))
+          (unless ch (error "Unterminated processing instruction"))
+          (cond
+            ((char= ch #\?)
+             (let ((ch2 (peek-char nil stream nil nil)))
+               (if (eql ch2 #\>)
+                   (progn
+                     (read-char stream) ; consume '>'
+                     (return (make-xml-pi :target target :data (copy-seq buf))))
+                   (vector-push-extend ch buf))))
+            (t
+             (vector-push-extend ch buf))))))))
+
+;;; DOCTYPE skipping — XML 1.0 §2.8
+
+(defun skip-doctype (stream)
+  "Skip a DOCTYPE declaration.  STREAM must be just past '<!DOCTYPE'.
+Handles a nested internal subset enclosed in '[' … ']'."
+  (let ((depth 0))
+    (loop
+      (let ((ch (read-char stream nil nil)))
+        (unless ch (error "Unterminated DOCTYPE declaration"))
+        (cond
+          ((char= ch #\[) (incf depth))
+          ((char= ch #\]) (decf depth))
+          ((and (= depth 0) (char= ch #\>)) (return)))))))
+
+;;; Character data parsing — XML 1.0 §2.4
+
+(defun parse-content-text (stream)
+  "Parse character data and entity/character references from STREAM up to
+the next '<'.  Returns the text string."
+  (let ((buf (make-array 0 :element-type 'character
+                           :adjustable t :fill-pointer 0)))
+    (loop
+      (let ((ch (peek-char nil stream nil nil)))
+        (when (or (null ch) (char= ch #\<))
+          (return)))
+      (let ((ch (read-char stream)))
         (cond
           ((char= ch #\&)
-           (destructuring-bind (expansion . new-pos)
-               (expand-entity-ref str (1+ pos))
-             (loop for c across expansion do (vector-push-extend c buf))
-             (setf pos new-pos)))
+           (let ((expansion (expand-entity-ref stream)))
+             (loop for c across expansion do (vector-push-extend c buf))))
           (t
-           (vector-push-extend ch buf)
-           (incf pos)))))
-    (cons (copy-seq buf) pos)))
+           (vector-push-extend ch buf)))))
+    (copy-seq buf)))
+
+;;; CDATA section parsing — XML 1.0 §2.7
+
+(defun parse-cdata-section (stream)
+  "Parse a CDATA section.  STREAM must be just past '<![CDATA['.
+Returns the raw content string."
+  (let ((buf (make-array 0 :element-type 'character
+                           :adjustable t :fill-pointer 0)))
+    (loop
+      (let ((ch (read-char stream nil nil)))
+        (unless ch (error "Unterminated CDATA section"))
+        (cond
+          ((char= ch #\])
+           (let ((ch2 (peek-char nil stream nil nil)))
+             (cond
+               ((eql ch2 #\])
+                (read-char stream)      ; consume second ']'
+                (let ((ch3 (peek-char nil stream nil nil)))
+                  (cond
+                    ((eql ch3 #\>)
+                     (read-char stream) ; consume '>'
+                     (return (copy-seq buf)))
+                    ;; ']]' not followed by '>' — emit first ']', unread second ']' for reprocessing
+                    (t
+                     (vector-push-extend ch buf)
+                     (unread-char #\] stream)))))
+               (t
+                (vector-push-extend ch buf)))))
+          (t
+           (vector-push-extend ch buf)))))))
 
 ;;; SAX handler protocol — event-driven parsing interface
 
@@ -390,142 +418,144 @@ Each stack frame is a list (tag attributes children-accumulator)."))
 
 ;;; SAX-based element parsing — XML 1.0 §3.1
 
-(defun parse-element-sax (str pos handler)
+(defun parse-element-sax (stream handler)
   "Parse an XML element whose opening '<' has already been consumed.
-POS points to the first character of the tag name.
-Fires START-ELEMENT, child events, and END-ELEMENT on HANDLER.
-Returns new-pos after the element."
-  (destructuring-bind (tag . after-tag) (parse-name str pos)
-    (destructuring-bind (attributes . after-attrs) (parse-attributes str after-tag)
-      (let ((pos (skip-whitespace str after-attrs)))
-        (cond
-          ;; Self-closing tag: />
-          ((and (< (1+ pos) (length str))
-                (char= (char str pos) #\/)
-                (char= (char str (1+ pos)) #\>))
-           (start-element handler tag attributes)
-           (end-element handler tag)
-           (+ pos 2))
-          ;; Opening tag: >  …content…  </tag>
-          ((and (< pos (length str))
-                (char= (char str pos) #\>))
-           (start-element handler tag attributes)
-           (let ((end-pos (parse-children-sax str (1+ pos) tag handler)))
-             (end-element handler tag)
-             end-pos))
-          (t
-           (error "Expected '>' or '/>' after attributes of '~a' at position ~a"
-                  tag pos)))))))
+STREAM is positioned at the first character of the tag name.
+Fires START-ELEMENT, child events, and END-ELEMENT on HANDLER."
+  (let* ((tag        (parse-name stream))
+         (attributes (parse-attributes stream)))
+    (skip-whitespace stream)
+    (let ((ch (peek-char nil stream nil nil)))
+      (cond
+        ;; Self-closing tag: />
+        ((eql ch #\/)
+         (read-char stream)             ; consume '/'
+         (unless (eql (read-char stream nil nil) #\>)
+           (error "Expected '>' to close self-closing tag '~a'" tag))
+         (start-element handler tag attributes)
+         (end-element handler tag))
+        ;; Opening tag: >  …content…  </tag>
+        ((eql ch #\>)
+         (read-char stream)             ; consume '>'
+         (start-element handler tag attributes)
+         (parse-children-sax stream tag handler)
+         (end-element handler tag))
+        (t
+         (error "Expected '>' or '/>' after attributes of '~a'" tag))))))
 
-(defun parse-children-sax (str pos parent-tag handler)
+(defun parse-children-sax (stream parent-tag handler)
   "Parse the content of an element, firing SAX events on HANDLER, until the
-matching closing tag is consumed.  Returns new-pos after the closing '>'."
+matching closing tag is consumed."
   (loop
-    (when (>= pos (length str))
-      (error "Unexpected end of input while parsing children of <~a>" parent-tag))
-    (let ((ch (char str pos)))
+    (let ((ch (peek-char nil stream nil nil)))
+      (unless ch
+        (error "Unexpected end of input while parsing children of <~a>" parent-tag))
       (cond
         ;; Character data (possibly containing entity references)
         ((char/= ch #\<)
-         (destructuring-bind (text . new-pos) (parse-content-text str pos)
-           (characters handler text)
-           (setf pos new-pos)))
+         (characters handler (parse-content-text stream)))
         ;; Markup starting with '<'
         (t
-         (incf pos)                     ; consume '<'
-         (when (>= pos (length str))
-           (error "Unexpected end of input after '<'"))
-         (let ((next (char str pos)))
+         (read-char stream)             ; consume '<'
+         (let ((next (peek-char nil stream nil nil)))
+           (unless next
+             (error "Unexpected end of input after '<'"))
            (cond
              ;; Closing tag: </parent-tag>
              ((char= next #\/)
-              (incf pos)                ; consume '/'
-              (destructuring-bind (tag . after-tag) (parse-name str pos)
+              (read-char stream)        ; consume '/'
+              (let ((tag (parse-name stream)))
                 (unless (string= tag parent-tag)
                   (error "Mismatched closing tag: expected </~a>, got </~a>"
                          parent-tag tag))
-                (let ((after-ws (skip-whitespace str after-tag)))
-                  (unless (and (< after-ws (length str))
-                               (char= (char str after-ws) #\>))
-                    (error "Expected '>' to close </~a> at position ~a"
-                           tag after-ws))
-                  (return (1+ after-ws)))))
+                (skip-whitespace stream)
+                (unless (eql (read-char stream nil nil) #\>)
+                  (error "Expected '>' to close </~a>" tag))
+                (return)))
              ;; Nodes beginning with '<!'
              ((char= next #\!)
-              (incf pos)                ; consume '!'
-              (cond
-                ;; Comment: <!--
-                ((and (< (1+ pos) (length str))
-                      (char= (char str pos) #\-)
-                      (char= (char str (1+ pos)) #\-))
-                 (destructuring-bind (comment-node . new-pos)
-                     (parse-comment str (+ pos 2))
-                   (comment handler (xml-comment-data comment-node))
-                   (setf pos new-pos)))
-                ;; CDATA section: <![CDATA[
-                ((and (<= (+ pos 7) (length str))
-                      (string= str "[CDATA[" :start1 pos :end1 (+ pos 7)))
-                 (let* ((cdata-start (+ pos 7))
-                        (end (search "]]>" str :start2 cdata-start)))
-                   (unless end
-                     (error "Unterminated CDATA section"))
-                   (cdata-section handler (subseq str cdata-start end))
-                   (setf pos (+ end 3))))
-                (t
-                 (error "Unexpected '<!' at position ~a" (- pos 2)))))
+              (read-char stream)        ; consume '!'
+              (let ((after-bang (peek-char nil stream nil nil)))
+                (cond
+                  ;; Comment: <!--
+                  ((eql after-bang #\-)
+                   (read-char stream)   ; consume first '-'
+                   (unless (eql (peek-char nil stream nil nil) #\-)
+                     (error "Expected second '-' in comment opening '<!--'"))
+                   (read-char stream)   ; consume second '-'
+                   (comment handler (xml-comment-data (parse-comment stream))))
+                  ;; CDATA section: <![CDATA[
+                  ((eql after-bang #\[)
+                   (read-char stream)   ; consume '['
+                   (loop for expected across "CDATA["
+                         do (let ((c (read-char stream nil nil)))
+                              (unless (and c (char= c expected))
+                                (error "Invalid CDATA section start"))))
+                   (cdata-section handler (parse-cdata-section stream)))
+                  (t
+                   (error "Unexpected '<!' sequence")))))
              ;; Processing instruction: <?
              ((char= next #\?)
-              (destructuring-bind (pi-node . new-pos)
-                  (parse-pi str (1+ pos))
+              (read-char stream)        ; consume '?'
+              (let ((pi-node (parse-pi stream)))
                 (processing-instruction handler
                                         (xml-pi-target pi-node)
-                                        (xml-pi-data pi-node))
-                (setf pos new-pos)))
+                                        (xml-pi-data pi-node))))
              ;; Child element
              (t
-              (setf pos (parse-element-sax str pos handler))))))))))
+              (parse-element-sax stream handler)))))))))
 
 ;;; SAX-based document prolog — XML 1.0 §2.8
 
-(defun parse-prolog-sax (str pos handler)
+(defun parse-prolog-sax (stream handler)
   "Parse the XML document prolog, firing SAX events for comments and
 processing instructions on HANDLER.  DOCTYPE declarations are silently
-skipped.  Returns new-pos pointing to the '<' of the root element."
+skipped.  Leaves STREAM positioned at the '<' of the root element."
   (loop
-    (setf pos (skip-whitespace str pos))
-    (unless (and (< pos (length str)) (char= (char str pos) #\<))
-      (return pos))
-    (let ((peek (and (< (1+ pos) (length str)) (char str (1+ pos)))))
+    (skip-whitespace stream)
+    (unless (eql (peek-char nil stream nil nil) #\<)
+      (return))
+    (read-char stream)                  ; consume '<'
+    (let ((next (peek-char nil stream nil nil)))
       (cond
-        ;; Comment: <!--
-        ((and (eql peek #\!)
-              (< (+ pos 3) (length str))
-              (char= (char str (+ pos 2)) #\-)
-              (char= (char str (+ pos 3)) #\-))
-         (destructuring-bind (comment-node . new-pos)
-             (parse-comment str (+ pos 4))
-           (comment handler (xml-comment-data comment-node))
-           (setf pos new-pos)))
-        ;; Processing instruction (includes XML declaration): <?
-        ((eql peek #\?)
-         (destructuring-bind (pi-node . new-pos)
-             (parse-pi str (+ pos 2))
+        ;; Processing instruction or XML declaration: <?
+        ((eql next #\?)
+         (read-char stream)             ; consume '?'
+         (let ((pi-node (parse-pi stream)))
            (processing-instruction handler
                                    (xml-pi-target pi-node)
-                                   (xml-pi-data pi-node))
-           (setf pos new-pos)))
-        ;; DOCTYPE: <!DOCTYPE
-        ((and (eql peek #\!)
-              (<= (+ pos 9) (length str))
-              (string= str "<!DOCTYPE" :start1 pos :end1 (+ pos 9)))
-         (setf pos (skip-doctype str (+ pos 9))))
-        ;; Anything else is the root element
-        (t (return pos))))))
+                                   (xml-pi-data pi-node))))
+        ;; Comment or DOCTYPE: <!
+        ((eql next #\!)
+         (read-char stream)             ; consume '!'
+         (let ((after-bang (peek-char nil stream nil nil)))
+           (cond
+             ;; Comment: <!--
+             ((eql after-bang #\-)
+              (read-char stream)        ; consume first '-'
+              (unless (eql (peek-char nil stream nil nil) #\-)
+                (error "Expected second '-' in comment opening '<!--'"))
+              (read-char stream)        ; consume second '-'
+              (comment handler (xml-comment-data (parse-comment stream))))
+             ;; DOCTYPE: <!DOCTYPE
+             ((eql after-bang #\D)
+              (loop for expected across "DOCTYPE"
+                    do (let ((c (read-char stream nil nil)))
+                         (unless (and c (char= c expected))
+                           (error "Invalid DOCTYPE declaration"))))
+              (skip-doctype stream))
+             (t
+              (error "Unexpected '<!~c' in prolog" after-bang)))))
+        ;; Anything else is the root element: unread '<' and stop
+        (t
+         (unread-char #\< stream)
+         (return))))))
 
 ;;; Public API
 
-(defun parse-xml (str &key (handler (make-instance 'dom-builder)))
-  "Parse STR as an XML document using a SAX-style event handler.
+(defun parse-xml (input &key (handler (make-instance 'dom-builder)))
+  "Parse INPUT (a string, standard character stream, or trivial-gray-streams
+character stream) as an XML document using a SAX-style event handler.
 
 When called without a HANDLER keyword argument, uses the built-in DOM-BUILDER
 handler and returns an XML-DOCUMENT node (backward-compatible behaviour).
@@ -539,9 +569,14 @@ PARSE-XML.
 
 Entity references (&amp; &lt; &gt; &quot; &apos; &#N; &#xN;) are expanded
 before CHARACTERS and attribute values are reported."
-  (start-document handler)
-  (let ((pos (parse-prolog-sax str 0 handler)))
-    (unless (and (< pos (length str)) (char= (char str pos) #\<))
-      (error "Expected root element at position ~a" pos))
-    (parse-element-sax str (1+ pos) handler))
-  (end-document handler))
+  (let ((stream (etypecase input
+                  (string (make-string-input-stream input))
+                  (fundamental-character-input-stream input)
+                  (stream input))))
+    (start-document handler)
+    (parse-prolog-sax stream handler)
+    (unless (eql (peek-char nil stream nil nil) #\<)
+      (error "Expected root element"))
+    (read-char stream)                  ; consume '<'
+    (parse-element-sax stream handler)
+    (end-document handler)))
