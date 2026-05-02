@@ -526,8 +526,8 @@ Returns an xml-doctype struct."
              (skip-whitespace stream)
              (setf public-id (%parse-dtd-quoted-string stream))
              (skip-whitespace stream)
-             ;; System identifier is optional after PUBLIC in external subsets
-             (when (member (peek-char nil stream nil nil) '(#\" #\') :test #'eql)
+            ;; System identifier is optional after PUBLIC in DOCTYPE declarations.
+             (when (member (peek-char nil stream nil nil) '(#\" #\'))
                (setf system-id (%parse-dtd-quoted-string stream))))
             (t
              (error "Expected SYSTEM or PUBLIC in DOCTYPE declaration, got '~a'"
