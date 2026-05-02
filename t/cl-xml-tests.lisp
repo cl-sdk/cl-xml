@@ -504,8 +504,8 @@
 
 ;;; ── Namespace resolution (resolve-namespaces) ────────────────────────────
 
-(defun resolve-root (str)
-  "Parse STR, resolve namespaces, and return the root xml-node."
+(defun resolve-root-tag (str)
+  "Parse STR, resolve namespaces, and return the tag (xml-qname) of the root xml-node."
   (cl-xml:xml-node-tag
    (cl-xml:xml-document-root
     (cl-xml:resolve-namespaces (cl-xml:parse-xml str)))))
@@ -521,7 +521,7 @@
 
 (test ns-resolve-prefixed-element
   "A prefixed element tag is resolved to an xml-qname with the correct URI."
-  (let ((tag (resolve-root "<ns:root xmlns:ns=\"http://example.com/\" />")))
+  (let ((tag (resolve-root-tag "<ns:root xmlns:ns=\"http://example.com/\" />")))
     (is (cl-xml:xml-qname-p tag))
     (is (string= "ns"                  (cl-xml:xml-qname-prefix tag)))
     (is (string= "root"                (cl-xml:xml-qname-local-name tag)))
@@ -529,7 +529,7 @@
 
 (test ns-resolve-default-namespace
   "An unprefixed element in a default namespace gets the declared namespace URI."
-  (let ((tag (resolve-root "<root xmlns=\"http://example.com/\" />")))
+  (let ((tag (resolve-root-tag "<root xmlns=\"http://example.com/\" />")))
     (is (cl-xml:xml-qname-p tag))
     (is (null (cl-xml:xml-qname-prefix tag)))
     (is (string= "root"                (cl-xml:xml-qname-local-name tag)))
@@ -537,7 +537,7 @@
 
 (test ns-resolve-no-namespace
   "An unprefixed element with no default namespace has nil namespace-uri."
-  (let ((tag (resolve-root "<root />")))
+  (let ((tag (resolve-root-tag "<root />")))
     (is (cl-xml:xml-qname-p tag))
     (is (null (cl-xml:xml-qname-prefix tag)))
     (is (string= "root" (cl-xml:xml-qname-local-name tag)))

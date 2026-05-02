@@ -32,7 +32,7 @@ ROOT is the root xml-node."
   root)
 
 (defstruct xml-qname
-  "Represents a namespace-qualified XML name (Namespaces in XML 1.0 §2).
+  "Represents a namespace-qualified XML name (Namespaces in XML 1.0 §2.1).
 PREFIX is the namespace prefix string, or NIL when there is no prefix.
 LOCAL-NAME is the local part of the name (the portion after ':'), or the full
 unqualified name when PREFIX is NIL.
@@ -628,7 +628,7 @@ and REMAINING is the list of non-declaration attributes."
         (cond
           ((string= k "xmlns")
            (push (cons nil v) ns-decls))
-          ((and (>= (length k) 6) (string= k "xmlns:" :end1 6))
+          ((and (> (length k) 6) (string= k "xmlns:" :end1 6))
            (push (cons (subseq k 6) v) ns-decls))
           (t
            (push attr remaining)))))
