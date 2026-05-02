@@ -135,6 +135,7 @@ Returns the expanded string."
 (defun expand-entity-ref (stream)
   "Parse and expand a predefined entity or character reference starting just
 after '&'.  Supports &amp; &lt; &gt; &quot; &apos; and &#N; / &#xN;.
+Unknown named entity references are passed through as literal text (&name;).
 Returns the expanded string."
   (if (eql (peek-char nil stream nil nil) #\#)
       (progn
@@ -151,9 +152,8 @@ Returns the expanded string."
                                        ("quot" . "\"")
                                        ("apos" . "'"))
                                      :test #'string=))))
-          (unless expansion
-            (error "Unknown entity reference '&~a;'" name))
-          expansion))))
+          ;; Unknown named entity: pass through as literal "&name;" text.
+          (or expansion (concatenate 'string "&" name ";"))))))
 
 ;;; Attribute value parsing — XML 1.0 §2.3, §3.3.3
 

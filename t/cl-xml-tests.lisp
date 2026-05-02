@@ -164,9 +164,18 @@
     (is (string= "a'b" (cdr (assoc "v" (cl-xml:xml-node-attributes node)
                                    :test #'string=))))))
 
-(test unknown-entity-ref-error
-  "An unknown named entity reference signals an error."
-  (signals error (cl-xml:parse-xml "<el v=\"&unknown;\" />")))
+(test unknown-entity-ref-passthrough
+  "An unknown named entity reference is passed through as literal '&name;' text."
+  (let ((node (parse-root "<el v=\"&unknown;\" />")))
+    (is (string= "&unknown;"
+                 (cdr (assoc "v" (cl-xml:xml-node-attributes node)
+                             :test #'string=))))))
+
+(test unknown-entity-ref-in-text-passthrough
+  "An unknown named entity reference in text content is passed through literally."
+  (let* ((root     (parse-root "<p>a&foo;b</p>"))
+         (children (cl-xml:xml-node-children root)))
+    (is (string= "a&foo;b" (first children)))))
 
 ;;; ── XML 1.0 conformance — Character references (§4.1) ───────────────────
 
