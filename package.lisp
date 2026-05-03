@@ -123,4 +123,11 @@
    #:parse-xml-events
    #:reduce-events
    #:parse-xml
-   #:resolve-namespaces))
+   #:resolve-namespaces
+   ;; XPath 1.0 evaluator
+   #:xpath-compile
+   #:xpath-select
+   #:xpath-first
+   #:xpath-string
+   #:xpath-number
+   #:xpath-boolean))

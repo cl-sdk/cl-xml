@@ -1255,3 +1255,423 @@
     ;; The PE reference is skipped; ELEMENT is still parsed
     (is (= 1 (length (cl-xml:xml-doctype-elements dtd))))))
 
+;;; ── XPath 1.0 evaluator ───────────────────────────────────────────────────
+
+;;; Helpers
+
+(defun xpath-doc (xml-string)
+  "Parse XML-STRING and return the xml-document."
+  (cl-xml:parse-xml xml-string))
+
+(defun xpath-tags (nodes)
+  "Return a list of tag strings from NODES (xml-node instances)."
+  (mapcar #'cl-xml:xml-node-tag nodes))
+
+;;; ── xpath-compile ─────────────────────────────────────────────────────────
+
+(test xpath-compile-returns-ast
+  "xpath-compile returns a non-NIL compiled XPath object."
+  (is (not (null (cl-xml:xpath-compile "/root")))))
+
+(test xpath-compile-error-on-bad-syntax
+  "xpath-compile signals an error on malformed input."
+  (signals error (cl-xml:xpath-compile "[")))
+
+;;; ── xpath-select: absolute paths ─────────────────────────────────────────
+
+(test xpath-root-slash
+  "The path '/' selects the document node itself."
+  (let* ((doc (xpath-doc "<root />"))
+         (result (cl-xml:xpath-select "/" doc)))
+    (is (= 1 (length result)))
+    (is (cl-xml:xml-document-p (first result)))))
+
+(test xpath-root-element
+  "'/root' selects the root element when its name matches."
+  (let* ((doc (xpath-doc "<root />"))
+         (result (cl-xml:xpath-select "/root" doc)))
+    (is (= 1 (length result)))
+    (is (string= "root" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-root-element-no-match
+  "'/other' returns empty list when root element name does not match."
+  (let* ((doc (xpath-doc "<root />"))
+         (result (cl-xml:xpath-select "/other" doc)))
+    (is (null result))))
+
+(test xpath-child-path
+  "'/root/child' selects direct children of root named 'child'."
+  (let* ((doc (xpath-doc "<root><child/><other/><child/></root>"))
+         (result (cl-xml:xpath-select "/root/child" doc)))
+    (is (= 2 (length result)))
+    (is (every (lambda (n) (string= "child" (cl-xml:xml-node-tag n))) result))))
+
+(test xpath-deep-path
+  "'/a/b/c' selects grandchildren at depth 3."
+  (let* ((doc (xpath-doc "<a><b><c/></b></a>"))
+         (result (cl-xml:xpath-select "/a/b/c" doc)))
+    (is (= 1 (length result)))
+    (is (string= "c" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-double-slash-from-root
+  "'//item' selects all descendants named 'item' regardless of depth."
+  (let* ((doc (xpath-doc "<root><item/><sub><item/></sub></root>"))
+         (result (cl-xml:xpath-select "//item" doc)))
+    (is (= 2 (length result)))))
+
+(test xpath-double-slash-mid-path
+  "'/root//item' selects all 'item' descendants under root."
+  (let* ((doc (xpath-doc "<root><item/><sub><item/></sub></root>"))
+         (result (cl-xml:xpath-select "/root//item" doc)))
+    (is (= 2 (length result)))))
+
+(test xpath-wildcard
+  "'/root/*' selects all element children of root."
+  (let* ((doc (xpath-doc "<root><a/><b/><c/></root>"))
+         (result (cl-xml:xpath-select "/root/*" doc)))
+    (is (= 3 (length result)))))
+
+;;; ── xpath-select: relative paths ─────────────────────────────────────────
+
+(test xpath-relative-child
+  "A relative path 'child' selects element children by name."
+  (let* ((doc  (xpath-doc "<root><child/><other/></root>"))
+         (root (cl-xml:xml-document-root doc))
+         (result (cl-xml:xpath-select "child" root :document doc)))
+    (is (= 1 (length result)))
+    (is (string= "child" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-dot-self
+  "'.' selects the context node itself."
+  (let* ((doc  (xpath-doc "<root />"))
+         (root (cl-xml:xml-document-root doc))
+         (result (cl-xml:xpath-select "." root :document doc)))
+    (is (= 1 (length result)))
+    (is (eq root (first result)))))
+
+(test xpath-dotdot-parent
+  "'..' selects the parent of the context node."
+  (let* ((doc   (xpath-doc "<root><child/></root>"))
+         (child (first (cl-xml:xml-node-children (cl-xml:xml-document-root doc))))
+         (result (cl-xml:xpath-select ".." child :document doc)))
+    (is (= 1 (length result)))
+    (is (string= "root" (cl-xml:xml-node-tag (first result))))))
+
+;;; ── xpath-select: attributes ──────────────────────────────────────────────
+
+(test xpath-attribute-shorthand
+  "'@attr' selects an attribute node."
+  (let* ((doc  (xpath-doc "<el id=\"42\" />"))
+         (root (cl-xml:xml-document-root doc))
+         (result (cl-xml:xpath-select "@id" root :document doc)))
+    (is (= 1 (length result)))
+    (is (string= "42" (cdr (first result))))))
+
+(test xpath-attribute-axis
+  "'attribute::name' is equivalent to '@name'."
+  (let* ((doc  (xpath-doc "<el key=\"v\" />"))
+         (root (cl-xml:xml-document-root doc))
+         (r1 (cl-xml:xpath-select "@key"           root :document doc))
+         (r2 (cl-xml:xpath-select "attribute::key" root :document doc)))
+    (is (equal r1 r2))))
+
+(test xpath-attribute-wildcard
+  "'@*' selects all attributes of the context node."
+  (let* ((doc  (xpath-doc "<el a=\"1\" b=\"2\" c=\"3\" />"))
+         (root (cl-xml:xml-document-root doc))
+         (result (cl-xml:xpath-select "@*" root :document doc)))
+    (is (= 3 (length result)))))
+
+;;; ── xpath-select: predicates ──────────────────────────────────────────────
+
+(test xpath-predicate-position
+  "Predicate [1] selects the first matching node."
+  (let* ((doc    (xpath-doc "<root><item/><item/><item/></root>"))
+         (result (cl-xml:xpath-select "/root/item[1]" doc)))
+    (is (= 1 (length result)))))
+
+(test xpath-predicate-attribute-presence
+  "[@attr] selects elements that have the attribute."
+  (let* ((doc    (xpath-doc "<root><a id=\"1\"/><b/><c id=\"3\"/></root>"))
+         (result (cl-xml:xpath-select "/root/*[@id]" doc)))
+    (is (= 2 (length result)))))
+
+(test xpath-predicate-attribute-value
+  "[@attr='val'] selects elements where the attribute equals the value."
+  (let* ((doc    (xpath-doc "<root><a type=\"x\"/><b type=\"y\"/><c type=\"x\"/></root>"))
+         (result (cl-xml:xpath-select "/root/*[@type='x']" doc)))
+    (is (= 2 (length result)))
+    (is (every (lambda (n) (string= "x" (cdr (assoc "type" (cl-xml:xml-node-attributes n)
+                                                      :test #'string=))))
+               result))))
+
+(test xpath-predicate-last
+  "[last()] selects the last element in the node set."
+  (let* ((doc    (xpath-doc "<root><a/><b/><c/></root>"))
+         (result (cl-xml:xpath-select "/root/*[last()]" doc)))
+    (is (= 1 (length result)))
+    (is (string= "c" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-predicate-child-exists
+  "[child-name] selects elements that have a child of that name."
+  (let* ((doc    (xpath-doc "<root><a><x/></a><b/><c><x/></c></root>"))
+         (result (cl-xml:xpath-select "/root/*[x]" doc)))
+    (is (= 2 (length result)))))
+
+;;; ── xpath-select: node-type tests ────────────────────────────────────────
+
+(test xpath-text-node-test
+  "'text()' selects text node children."
+  (let* ((doc    (xpath-doc "<root>hello</root>"))
+         (result (cl-xml:xpath-select "/root/text()" doc)))
+    (is (= 1 (length result)))
+    (is (string= "hello" (first result)))))
+
+(test xpath-comment-node-test
+  "'comment()' selects comment children."
+  (let* ((doc    (xpath-doc "<root><!-- hi --></root>"))
+         (result (cl-xml:xpath-select "/root/comment()" doc)))
+    (is (= 1 (length result)))
+    (is (cl-xml:xml-comment-p (first result)))))
+
+(test xpath-node-test-any
+  "'node()' selects all child nodes including text and elements."
+  (let* ((doc    (xpath-doc "<root>text<el/></root>"))
+         (result (cl-xml:xpath-select "/root/node()" doc)))
+    (is (= 2 (length result)))))
+
+;;; ── xpath-select: axes ────────────────────────────────────────────────────
+
+(test xpath-ancestor-axis
+  "'ancestor::*' returns all element ancestors."
+  (let* ((doc     (xpath-doc "<a><b><c/></b></a>"))
+         (c-node  (first (cl-xml:xml-node-children
+                          (first (cl-xml:xml-node-children
+                                  (cl-xml:xml-document-root doc))))))
+         (result  (cl-xml:xpath-select "ancestor::*" c-node :document doc)))
+    (is (= 2 (length result)))
+    (is (string= "a" (cl-xml:xml-node-tag (first  result))))
+    (is (string= "b" (cl-xml:xml-node-tag (second result))))))
+
+(test xpath-following-sibling-axis
+  "'following-sibling::*' returns later siblings."
+  (let* ((doc   (xpath-doc "<root><a/><b/><c/></root>"))
+         (root  (cl-xml:xml-document-root doc))
+         (a-node (first (cl-xml:xml-node-children root)))
+         (result (cl-xml:xpath-select "following-sibling::*" a-node :document doc)))
+    (is (= 2 (length result)))
+    (is (string= "b" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-preceding-sibling-axis
+  "'preceding-sibling::*' returns earlier siblings."
+  (let* ((doc    (xpath-doc "<root><a/><b/><c/></root>"))
+         (root   (cl-xml:xml-document-root doc))
+         (c-node (third (cl-xml:xml-node-children root)))
+         (result (cl-xml:xpath-select "preceding-sibling::*" c-node :document doc)))
+    (is (= 2 (length result)))))
+
+(test xpath-descendant-axis
+  "'descendant::item' selects all descendants named 'item'."
+  (let* ((doc    (xpath-doc "<root><item/><sub><item/></sub></root>"))
+         (root   (cl-xml:xml-document-root doc))
+         (result (cl-xml:xpath-select "descendant::item" root :document doc)))
+    (is (= 2 (length result)))))
+
+;;; ── xpath-select: union ───────────────────────────────────────────────────
+
+(test xpath-union
+  "expr | expr returns the union of two node sets."
+  (let* ((doc    (xpath-doc "<root><a/><b/></root>"))
+         (result (cl-xml:xpath-select "/root/a | /root/b" doc)))
+    (is (= 2 (length result)))))
+
+;;; ── xpath-first ───────────────────────────────────────────────────────────
+
+(test xpath-first-returns-first
+  "xpath-first returns the first matching node."
+  (let* ((doc (xpath-doc "<root><item/><item/></root>"))
+         (n   (cl-xml:xpath-first "/root/item" doc)))
+    (is (not (null n)))
+    (is (string= "item" (cl-xml:xml-node-tag n)))))
+
+(test xpath-first-returns-nil-on-no-match
+  "xpath-first returns NIL when there are no matches."
+  (let* ((doc (xpath-doc "<root/>"))
+         (n   (cl-xml:xpath-first "/root/missing" doc)))
+    (is (null n))))
+
+;;; ── xpath-string ──────────────────────────────────────────────────────────
+
+(test xpath-string-text-content
+  "xpath-string returns the text content of the first matched element."
+  (let* ((doc (xpath-doc "<root><item>hello</item></root>")))
+    (is (string= "hello" (cl-xml:xpath-string "/root/item" doc)))))
+
+(test xpath-string-attribute-value
+  "xpath-string returns the value of a matched attribute node."
+  (let* ((doc  (xpath-doc "<el id=\"42\" />"))
+         (root (cl-xml:xml-document-root doc)))
+    (is (string= "42" (cl-xml:xpath-string "@id" root :document doc)))))
+
+(test xpath-string-nil-on-no-match
+  "xpath-string returns NIL when there are no matches."
+  (let* ((doc (xpath-doc "<root/>"))
+         (r   (cl-xml:xpath-string "/root/missing" doc)))
+    (is (null r))))
+
+;;; ── xpath-number ──────────────────────────────────────────────────────────
+
+(test xpath-number-literal
+  "xpath-number evaluates a numeric literal."
+  (let* ((doc (xpath-doc "<root/>"))
+         (n   (cl-xml:xpath-number "42" doc)))
+    (is (= 42 n))))
+
+(test xpath-number-count
+  "xpath-number on count() returns the count of matching nodes."
+  (let* ((doc (xpath-doc "<root><item/><item/><item/></root>"))
+         (n   (cl-xml:xpath-number "count(/root/item)" doc)))
+    (is (= 3 n))))
+
+;;; ── xpath-boolean ─────────────────────────────────────────────────────────
+
+(test xpath-boolean-true
+  "xpath-boolean returns T for a non-empty node-set."
+  (let* ((doc (xpath-doc "<root><item/></root>")))
+    (is (eq t (cl-xml:xpath-boolean "/root/item" doc)))))
+
+(test xpath-boolean-false
+  "xpath-boolean returns NIL for an empty node-set."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (null (cl-xml:xpath-boolean "/root/missing" doc)))))
+
+(test xpath-boolean-comparison
+  "xpath-boolean evaluates comparison expressions."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t   (cl-xml:xpath-boolean "1 = 1" doc)))
+    (is (null   (cl-xml:xpath-boolean "1 = 2" doc)))))
+
+;;; ── Built-in functions ────────────────────────────────────────────────────
+
+(test xpath-fn-count
+  "count() returns the number of nodes in a node-set."
+  (let* ((doc (xpath-doc "<root><a/><b/><c/></root>")))
+    (is (= 3 (cl-xml:xpath-number "count(/root/*)" doc)))))
+
+(test xpath-fn-string
+  "string() converts its argument to a string."
+  (let* ((doc (xpath-doc "<root><item>hello</item></root>")))
+    (is (string= "hello" (cl-xml:xpath-string "string(/root/item)" doc)))))
+
+(test xpath-fn-normalize-space
+  "normalize-space() collapses whitespace."
+  (let* ((doc (xpath-doc "<root>  hello   world  </root>")))
+    (is (string= "hello world"
+                 (cl-xml:xpath-string "normalize-space(/root)" doc)))))
+
+(test xpath-fn-contains
+  "contains() returns T when the first string contains the second."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "contains('foobar', 'oba')" doc)))
+    (is (null  (cl-xml:xpath-boolean "contains('foobar', 'xyz')" doc)))))
+
+(test xpath-fn-starts-with
+  "starts-with() tests the prefix of a string."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "starts-with('hello', 'hel')" doc)))
+    (is (null  (cl-xml:xpath-boolean "starts-with('hello', 'ell')" doc)))))
+
+(test xpath-fn-string-length
+  "string-length() returns the character count of the string."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 5 (cl-xml:xpath-number "string-length('hello')" doc)))))
+
+(test xpath-fn-not
+  "not() negates its boolean argument."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "not(false())" doc)))
+    (is (null  (cl-xml:xpath-boolean "not(true())"  doc)))))
+
+(test xpath-fn-concat
+  "concat() concatenates string arguments."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (string= "hello world"
+                 (cl-xml:xpath-string "concat('hello', ' ', 'world')" doc)))))
+
+(test xpath-fn-true-false
+  "true() and false() return the boolean constants."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "true()"  doc)))
+    (is (null  (cl-xml:xpath-boolean "false()" doc)))))
+
+(test xpath-fn-position-last
+  "position() and last() reflect the context within a predicate."
+  (let* ((doc (xpath-doc "<root><a/><b/><c/></root>"))
+         (result (cl-xml:xpath-select "/root/*[position() = last()]" doc)))
+    (is (= 1 (length result)))
+    (is (string= "c" (cl-xml:xml-node-tag (first result))))))
+
+(test xpath-fn-name
+  "name() returns the element name."
+  (let* ((doc (xpath-doc "<foo/>")))
+    (is (string= "foo" (cl-xml:xpath-string "name(/foo)" doc)))))
+
+;;; ── Arithmetic and comparisons ────────────────────────────────────────────
+
+(test xpath-arithmetic-plus
+  "Arithmetic: addition."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 7 (cl-xml:xpath-number "3 + 4" doc)))))
+
+(test xpath-arithmetic-minus
+  "Arithmetic: subtraction."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 2 (cl-xml:xpath-number "5 - 3" doc)))))
+
+(test xpath-arithmetic-multiply
+  "Arithmetic: multiplication."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 12 (cl-xml:xpath-number "3 * 4" doc)))))
+
+(test xpath-arithmetic-div
+  "Arithmetic: division."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 2 (cl-xml:xpath-number "6 div 3" doc)))))
+
+(test xpath-arithmetic-mod
+  "Arithmetic: modulo."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (= 1 (cl-xml:xpath-number "7 mod 3" doc)))))
+
+(test xpath-comparison-ne
+  "!= comparison returns true when values differ."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "1 != 2" doc)))
+    (is (null  (cl-xml:xpath-boolean "2 != 2" doc)))))
+
+(test xpath-comparison-lt-gt
+  "< and > comparisons."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "1 < 2"  doc)))
+    (is (null  (cl-xml:xpath-boolean "2 < 1"  doc)))
+    (is (eq t  (cl-xml:xpath-boolean "2 > 1"  doc)))))
+
+(test xpath-boolean-and-or
+  "'and' and 'or' operators."
+  (let* ((doc (xpath-doc "<root/>")))
+    (is (eq t  (cl-xml:xpath-boolean "true() and true()"  doc)))
+    (is (null  (cl-xml:xpath-boolean "true() and false()" doc)))
+    (is (eq t  (cl-xml:xpath-boolean "false() or true()"  doc)))
+    (is (null  (cl-xml:xpath-boolean "false() or false()" doc)))))
+
+;;; ── xpath-compile caching ─────────────────────────────────────────────────
+
+(test xpath-compiled-object-reuse
+  "A compiled XPath object can be reused across multiple calls."
+  (let* ((doc    (xpath-doc "<root><item/><item/></root>"))
+         (compiled (cl-xml:xpath-compile "/root/item"))
+         (r1    (cl-xml:xpath-select compiled doc))
+         (r2    (cl-xml:xpath-select compiled doc)))
+    (is (= 2 (length r1)))
+    (is (equal r1 r2))))
+
