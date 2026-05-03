@@ -54,11 +54,14 @@ STRING is the human-readable fault message
   (SOAP 1.1 faultstring text; SOAP 1.2 Reason/Text text).
 ACTOR is the URI string identifying the node that faulted, or NIL
   (SOAP 1.1 faultactor text; SOAP 1.2 Role text).
-DETAIL is the xml-node representing the detail/Detail element, or NIL."
+DETAIL is the xml-node representing the detail/Detail element, or NIL.
+LANG is the BCP 47 language tag for the SOAP 1.2 Reason/Text xml:lang attribute
+  (default \"en\"); ignored when serializing SOAP 1.1."
   code
   string
   actor
-  detail)
+  detail
+  (lang "en"))
 
 ;;; ─── SOAP error condition ─────────────────────────────────────────────────
 
@@ -80,7 +83,10 @@ MESSAGE is a string describing the problem; PATH is the element location, or NIL
 ;;; ─── Internal helpers — tag name extraction ──────────────────────────────
 
 (defun %soap-local (node)
-  "Return the local (unprefixed) name of xml-node NODE's tag."
+  "Return the local (unprefixed) name of xml-node NODE's tag.
+After RESOLVE-NAMESPACES the tag is always an XML-QNAME; the string fallback
+handles nodes that have not been through namespace resolution (e.g., raw
+soap-fragment-wrapper children created directly from PARSE-XML)."
   (let ((tag (xml-node-tag node)))
     (if (xml-qname-p tag)
         (xml-qname-local-name tag)
@@ -223,8 +229,10 @@ implied by the tag and attributes of NODE (does not recurse into children)."
     (format stream "<soap:Code><soap:Value>~a</soap:Value></soap:Code>"
             (%soap-escape-text (soap-fault-code fault))))
   (when (soap-fault-string fault)
-    (format stream "<soap:Reason><soap:Text>~a</soap:Text></soap:Reason>"
-            (%soap-escape-text (soap-fault-string fault))))
+    (let ((lang (or (soap-fault-lang fault) "en")))
+      (format stream "<soap:Reason><soap:Text xml:lang=\"~a\">~a</soap:Text></soap:Reason>"
+              (%soap-escape-attr lang)
+              (%soap-escape-text (soap-fault-string fault)))))
   (when (soap-fault-actor fault)
     (format stream "<soap:Role>~a</soap:Role>"
             (%soap-escape-text (soap-fault-actor fault))))
@@ -291,7 +299,7 @@ using the namespace prefix 'soap' for the SOAP envelope namespace."
 
 (defun %parse-soap-fault-1.2 (fault-node)
   "Parse a SOAP 1.2 env:Fault element into a soap-fault struct."
-  (let (code string actor detail)
+  (let (code string lang actor detail)
     (dolist (child (%soap-element-children fault-node))
       (let ((local (%soap-local child)))
         (cond
@@ -302,12 +310,24 @@ using the namespace prefix 'soap' for the SOAP envelope namespace."
           ((string= local "Reason")
            (let ((text (find-if (lambda (c) (string= "Text" (%soap-local c)))
                                 (%soap-element-children child))))
-             (when text (setf string (%soap-text-content text)))))
+             (when text
+               (setf string (%soap-text-content text))
+               ;; Extract xml:lang attribute (may be a plain string or xml-qname key)
+               (setf lang
+                     (cdr (find-if (lambda (attr)
+                                     (let ((k (car attr)))
+                                       (string= "lang"
+                                                (if (xml-qname-p k)
+                                                    (xml-qname-local-name k)
+                                                    (let ((c (position #\: k)))
+                                                      (if c (subseq k (1+ c)) k))))))
+                                   (xml-node-attributes text)))))))
           ((string= local "Role")
            (setf actor (%soap-text-content child)))
           ((string= local "Detail")
            (setf detail child)))))
-    (make-soap-fault :code code :string string :actor actor :detail detail)))
+    (make-soap-fault :code code :string string :lang (or lang "en")
+                     :actor actor :detail detail)))
 
 ;;; ─── Public: parse-soap ──────────────────────────────────────────────────
 
@@ -385,7 +405,9 @@ that multiple sibling elements are accepted.  Namespace declarations are
 resolved so that tags in the returned xml-nodes carry xml-qname structs.
 Returns a soap-envelope struct."
   (flet ((parse-fragment (xml)
-           (let* ((wrapped  (concatenate 'string "<_w>" xml "</_w>"))
+           (let* ((wrapped  (concatenate 'string
+                                         "<soap-fragment-wrapper>" xml
+                                         "</soap-fragment-wrapper>"))
                   (doc      (parse-xml wrapped))
                   (resolved (resolve-namespaces doc)))
              (remove-if-not #'xml-node-p

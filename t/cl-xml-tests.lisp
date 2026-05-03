@@ -1997,6 +1997,13 @@
                        (cl-xml:xml-qname-local-name tag)
                        tag))))))
 
+(test parse-soap-1.2-fault-lang
+  "SOAP 1.2 fault lang is extracted from Reason/Text xml:lang attribute."
+  (let* ((fault (cl-xml:soap-body-fault
+                 (cl-xml:soap-envelope-body
+                  (cl-xml:parse-soap +soap-1.2-fault+)))))
+    (is (string= "en" (cl-xml:soap-fault-lang fault)))))
+
 ;;; parse-soap — error cases
 
 (test parse-soap-not-envelope-error

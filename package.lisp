@@ -203,6 +203,7 @@
    #:soap-fault-string
    #:soap-fault-actor
    #:soap-fault-detail
+   #:soap-fault-lang
    ;; SOAP error condition
    #:soap-error
    #:soap-error-message
