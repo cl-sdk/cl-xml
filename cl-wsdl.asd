@@ -1,4 +1,4 @@
-(defsystem "cl-xml.wsdl"
+(defsystem "cl-wsdl"
   :description "WSDL 2.0 support for cl-xml."
   :version "0.1.0"
   :license "MIT"

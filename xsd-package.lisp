@@ -1,4 +1,4 @@
-(defpackage #:cl-xml.xsd
+(defpackage #:cl-xsd
   (:use #:cl #:cl-xml)
   (:export
    ;; XSD schema structures

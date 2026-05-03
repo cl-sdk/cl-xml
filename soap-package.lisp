@@ -1,4 +1,4 @@
-(defpackage #:cl-xml.soap
+(defpackage #:cl-soap
   (:use #:cl #:cl-xml)
   (:export
    ;; SOAP namespace URI constants

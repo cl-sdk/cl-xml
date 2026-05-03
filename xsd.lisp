@@ -1,4 +1,4 @@
-(in-package #:cl-xml.xsd)
+(in-package #:cl-xsd)
 
 ;;;; XSD (XML Schema Definition) — subset implementation
 ;;;;

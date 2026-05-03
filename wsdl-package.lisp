@@ -1,4 +1,4 @@
-(defpackage #:cl-xml.wsdl
+(defpackage #:cl-wsdl
   (:use #:cl #:cl-xml)
   (:export
    ;; WSDL 2.0 namespace constant

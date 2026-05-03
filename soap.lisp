@@ -1,4 +1,4 @@
-(in-package #:cl-xml.soap)
+(in-package #:cl-soap)
 
 ;;;; SOAP (Simple Object Access Protocol) — 1.1 and 1.2 implementation
 ;;;;
