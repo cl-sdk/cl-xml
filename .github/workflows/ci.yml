@@ -61,4 +61,5 @@ jobs:
       - name: run
         run: |
           ros use sbcl
+          qlot install
           LISP="ros run --" make tests 2> /dev/null
